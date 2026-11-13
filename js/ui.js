@@ -58,7 +58,7 @@ const RIBBON = {
   ],
   datos: [
     group('Ordenar', big('sortAZ', 'north', 'A → Z', 'Ordenar de A a Z') + big('sortZA', 'south', 'Z → A', 'Ordenar de Z a A')),
-    group('Obtener datos', big('import', 'upload_file', 'Importar Excel', 'Abrir un archivo .xlsx (por ejemplo PEDIDO BODEGAS 2024.xlsx)')),
+    group('Obtener datos', big('syncFile', 'sync', 'Actualizar desde Excel', 'Elegir una versión nueva del Excel: solo se actualizan las celdas que cambiaron') + big('import', 'upload_file', 'Importar Excel', 'Agregar las hojas de otro archivo .xlsx como hojas nuevas')),
     group('Exportar', big('exportXlsx', 'download', 'Descargar .xlsx') + big('exportCsv', 'csv', 'Descargar CSV'))
   ],
   vista: [

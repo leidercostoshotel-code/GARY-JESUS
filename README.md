@@ -29,6 +29,22 @@ y el nombre de las demás). Cada cambio se guarda solo, al instante.
 - Exportar a .xlsx o cambiar el nombre de una hoja descarga todas las hojas, porque lo necesita.
 - Al insertar o eliminar filas/columnas se corrigen las fórmulas de las hojas ya cargadas; las referencias desde hojas que nadie ha abierto en esa sesión no se ajustan.
 
+## Subir una versión nueva de los Excel
+
+1. Reemplaza el archivo en el repositorio **con el mismo nombre** (`PEDIDO BODEGAS 2024.xlsx` o
+   `PEDIDO DE COCINA 2024 - copia.xlsx`).
+2. Publica (`git pull` y `firebase deploy --only hosting`).
+3. La primera persona que abra el libro lo actualiza en la nube para todos:
+   - Primero solo pregunta si el archivo cambió (sin descargarlo).
+   - Las hojas cuya huella no cambió **no se leen ni se escriben**.
+   - En las hojas que cambiaron, solo se escriben las celdas que el Excel cambió respecto a su versión anterior.
+     Lo que el equipo escribió en la página en otras celdas se respeta.
+   - Las hojas nuevas del Excel se agregan; las hojas creadas en la página no se borran, y una hoja que alguien borró
+     en la página no se vuelve a crear.
+
+También se puede hacer a mano con **Datos → Actualizar desde Excel**, eligiendo el archivo.
+`datos/base/` guarda la versión con la que se cargaron los libros la primera vez; no la borres.
+
 ## Configurar Firebase (una sola vez)
 
 1. Entra a <https://console.firebase.google.com> y crea un proyecto.

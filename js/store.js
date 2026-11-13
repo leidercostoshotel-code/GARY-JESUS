@@ -112,6 +112,7 @@ function localStore(book, h) {
     },
     presence(v) { myPres = v; if (bc) bc.postMessage({ t: 'pres', id: me, v }); },
     watch(sid) { setTimeout(() => h.onLoaded(sid)); },
+    read: path => Promise.resolve(clone(getIn(tree, path))),
     pending: () => 0
   };
 }
@@ -121,7 +122,7 @@ async function firebaseStore(book, h) {
   const [appM, dbM, authM] = await Promise.all([
     import(SDK + 'firebase-app.js'), import(SDK + 'firebase-database.js'), import(SDK + 'firebase-auth.js')
   ]);
-  const { ref, child, onValue, onChildAdded, onChildChanged, onChildRemoved, update, set, onDisconnect, serverTimestamp } = dbM;
+  const { ref, child, get, onValue, onChildAdded, onChildChanged, onChildRemoved, update, set, onDisconnect, serverTimestamp } = dbM;
   const cfg = { ...firebaseConfig, databaseURL: firebaseConfig.databaseURL || `https://${firebaseConfig.projectId}-default-rtdb.firebaseio.com` };
   const app = appM.initializeApp(cfg);
   const auth = authM.getAuth(app);
@@ -204,6 +205,7 @@ async function firebaseStore(book, h) {
       myPres = v; if (connected) set(presRef, { ...v, ts: serverTimestamp() });
     },
     watch: watchCells,
+    read: path => get(child(root, path)).then(s => s.val()),
     pending: () => pending
   };
 }
