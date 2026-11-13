@@ -111,6 +111,7 @@ function localStore(book, h) {
       return Promise.resolve();
     },
     presence(v) { myPres = v; if (bc) bc.postMessage({ t: 'pres', id: me, v }); },
+    watch(sid) { setTimeout(() => h.onLoaded(sid)); },
     pending: () => 0
   };
 }
@@ -139,14 +140,14 @@ async function firebaseStore(book, h) {
   }, 15000);
 
   // Cola de cambios pendientes: si se cierra la página sin conexión, se reenvían al volver.
-  const readOutbox = () => { try { return JSON.parse(localStorage.getItem(OUTBOX) || '[]'); } catch { return []; } };
-  const writeOutbox = list => { try { localStorage.setItem(OUTBOX, JSON.stringify(list)); } catch { /* sin espacio */ } };
+  let outbox = [];
+  try { outbox = JSON.parse(localStorage.getItem(OUTBOX) || '[]'); } catch { outbox = []; }
+  const saveOutbox = () => { try { localStorage.setItem(OUTBOX, JSON.stringify(outbox)); } catch { /* sin espacio */ } };
   const send = (id, updates) => {
     pending++; status();
-    return update(root, updates).then(() => {
-      writeOutbox(readOutbox().filter(x => x.id !== id));
-    }).catch(e => {
-      writeOutbox(readOutbox().filter(x => x.id !== id));
+    const done = () => { const n = outbox.length; outbox = outbox.filter(x => x.id !== id); if (outbox.length !== n) saveOutbox(); };
+    return update(root, updates).then(done).catch(e => {
+      done();
       h.onError('Firebase rechazó un cambio: ' + (e.code || e.message) + '. Revisa las reglas de la base de datos.');
     }).finally(() => { pending--; status(); });
   };
@@ -162,6 +163,8 @@ async function firebaseStore(book, h) {
 
   onValue(child(root, 'meta'), s => h.onMeta(s.val() || {}));
 
+  // Lecturas eficientes: solo se descargan las celdas de las hojas que se abren
+  // (y de las que usan sus fórmulas). Después llegan solo los cambios.
   const hojas = child(root, 'hojas');
   const cellSubs = {};
   const watchCells = sid => {
@@ -172,8 +175,9 @@ async function firebaseStore(book, h) {
       onChildChanged(cr, s => h.onCell(sid, s.key, s.val())),
       onChildRemoved(cr, s => h.onCell(sid, s.key, null))
     ];
+    onValue(cr, () => h.onLoaded(sid), { onlyOnce: true });
   };
-  onChildAdded(hojas, s => { h.onSheet(s.key, s.val()); watchCells(s.key); });
+  onChildAdded(hojas, s => h.onSheet(s.key, s.val()));
   onChildChanged(hojas, s => h.onSheet(s.key, s.val()));
   onChildRemoved(hojas, s => { (cellSubs[s.key] || []).forEach(u => u()); delete cellSubs[s.key]; h.onSheet(s.key, null); });
   onValue(hojas, () => h.onReady(), { onlyOnce: true });
@@ -183,7 +187,7 @@ async function firebaseStore(book, h) {
   onChildChanged(pres, s => { if (s.key !== me) h.onPresence(s.key, s.val()); });
   onChildRemoved(pres, s => h.onPresence(s.key, null));
 
-  for (const item of readOutbox()) send(item.id, item.updates);
+  for (const item of outbox) send(item.id, item.updates);
 
   window.addEventListener('beforeunload', e => { if (pending > 0) { e.preventDefault(); e.returnValue = ''; } });
 
@@ -191,10 +195,15 @@ async function firebaseStore(book, h) {
     id: me, mode: 'firebase',
     write(updates) {
       const id = randomId();
-      writeOutbox([...readOutbox(), { id, updates }]);
+      const json = JSON.stringify(updates);
+      if (json.length < 200000) { outbox.push({ id, updates }); saveOutbox(); }
       return send(id, updates);
     },
-    presence(v) { myPres = v; if (connected) set(presRef, { ...v, ts: serverTimestamp() }); },
+    presence(v) {
+      if (myPres && JSON.stringify(myPres) === JSON.stringify(v)) return;
+      myPres = v; if (connected) set(presRef, { ...v, ts: serverTimestamp() });
+    },
+    watch: watchCells,
     pending: () => pending
   };
 }

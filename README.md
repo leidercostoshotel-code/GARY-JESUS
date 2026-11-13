@@ -6,7 +6,7 @@ y el nombre de las demás). Cada cambio se guarda solo, al instante.
 
 - `index.html` tiene 17 líneas; toda la lógica está en JavaScript (`js/`) y el diseño en `css/excel.css`.
 - Se puede **instalar en la computadora** como aplicación (Chrome / Edge → botón **Instalar**).
-- Fondo e ícono con la foto del hotel (`img/hotel.jpg`).
+- Al abrir, se elige el libro: **PEDIDO BODEGAS 2024** o **PEDIDO DE COCINA 2024**. La primera vez que alguien abre cada uno, su `.xlsx` se carga solo en Firebase.
 
 ## Qué incluye
 
@@ -19,6 +19,15 @@ y el nombre de las demás). Cada cambio se guarda solo, al instante.
 | Hojas | Agregar, cambiar nombre, mover, eliminar; **Plantilla de pedido** con el formato de *PEDIDO BODEGAS 2024* |
 | Archivos | Importar `.xlsx` (por ejemplo los dos archivos de este repositorio), descargar `.xlsx` y `.csv`, imprimir |
 | Equipo | Presencia en tiempo real, enlace para compartir, varios libros (`#libro=codigo`) |
+
+## Lecturas y escrituras eficientes
+
+- Cada persona descarga **solo la hoja que abre** (y las hojas que usan sus fórmulas); después recibe solo los cambios.
+- Cada edición escribe **solo la celda modificada** (`libros/{libro}/celdas/{hoja}/{A1}`), no la hoja completa.
+- La posición de los compañeros se envía como máximo cada 0,4 s y solo si cambió.
+- Los libros del repositorio se cargan una sola vez, con identificadores fijos de hoja, así que si dos personas los abren a la vez no se duplican.
+- Exportar a .xlsx o cambiar el nombre de una hoja descarga todas las hojas, porque lo necesita.
+- Al insertar o eliminar filas/columnas se corrigen las fórmulas de las hojas ya cargadas; las referencias desde hojas que nadie ha abierto en esa sesión no se ajustan.
 
 ## Configurar Firebase (una sola vez)
 
@@ -53,11 +62,10 @@ firebase login
 firebase deploy
 ```
 
-## Foto del hotel
+## Ícono
 
-`img/hotel.jpg` es una ilustración provisional. Para usar la foto real, súbela con ese mismo
-nombre (`img/hotel.jpg`). El fondo y el ícono de la pestaña la usan al instante. Para regenerar
-también los íconos de instalación, guarda la foto como `img/hotel-foto.jpg` y ejecuta:
+El ícono de instalación y el de la pestaña salen de `img/hotel.jpg`. Para usar la foto real del hotel,
+guárdala como `img/hotel-foto.jpg` y ejecuta:
 
 ```bash
 python3 tools/generar_imagenes.py

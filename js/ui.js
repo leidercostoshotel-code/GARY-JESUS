@@ -63,17 +63,17 @@ const RIBBON = {
   ],
   vista: [
     group('Zoom', big('zoomIn', 'zoom_in', 'Acercar') + big('zoomOut', 'zoom_out', 'Alejar') + big('zoom100', 'fit_screen', '100%')),
-    group('Mostrar', big('grid', 'grid_on', 'Cuadrícula', 'Mostrar u ocultar líneas de cuadrícula') + big('bgToggle', 'apartment', 'Fondo del hotel', 'Mostrar u ocultar la foto de fondo')),
+    group('Mostrar', big('grid', 'grid_on', 'Cuadrícula', 'Mostrar u ocultar líneas de cuadrícula')),
     group('Ventana', big('fullscreen', 'fullscreen', 'Pantalla completa') + big('install', 'install_desktop', 'Instalar app', 'Instalar en esta computadora'))
   ]
 };
 
 export function buildUI(root) {
   root.innerHTML = `
-  <div class="bgphoto"></div>
   <header class="titlebar">
     <div class="tb-left">
       <span class="logo" title="Excel en la nube"><img src="icons/icon-192.png" alt=""></span>
+      <button class="tbtn libros" data-cmd="home" title="Elegir otro libro">${ic('apps')}<span>Libros</span></button>
       <span class="autosave" title="Cada cambio se guarda automáticamente">Autoguardado <span class="switch on"><i></i></span></span>
       <button class="tbtn" data-cmd="save" title="Guardado automático">${ic('save')}</button>
       <button class="tbtn" data-cmd="undo" title="Deshacer (Ctrl+Z)">${ic('undo')}</button>
