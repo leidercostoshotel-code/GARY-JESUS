@@ -22,7 +22,7 @@ export const NUMFMT = [['', 'General'], ['num', 'Número'], ['cur', 'Moneda (S/)
 
 const RIBBON = {
   inicio: [
-    group('Portapapeles', big('paste', 'content_paste', 'Pegar', 'Pegar (Ctrl+V)') +
+    group('Portapapeles', `<span class="pastebig">${big('paste', 'content_paste', 'Pegar', 'Pegar (Ctrl+V)')}<button class="rb dd pdd" data-cmd="pasteMenu" title="Opciones de pegado">${ic('arrow_drop_down')}</button></span>` +
       col(sm('cut', 'content_cut', 'Cortar (Ctrl+X)', 'Cortar') + sm('copy', 'content_copy', 'Copiar (Ctrl+C)', 'Copiar') + sm('painter', 'format_paint', 'Copiar formato', 'Copiar formato'))),
     group('Fuente',
       col(row(sel('font', 'w-font', FONTS.map(f => [f, f]), 'Fuente') + sel('size', 'w-size', SIZES.map(s => [s, s]), 'Tamaño de fuente') +
@@ -143,34 +143,65 @@ export function buildUI(root) {
 }
 
 // ---------- menús flotantes y diálogos ----------
-let openMenu = null;
-export function closeMenu() { if (openMenu) { openMenu.remove(); openMenu = null; } }
-export function menu(items, at) {
-  closeMenu();
+// Menús con submenús (›), buscador y bloques personalizados, como los de Excel
+const menus = [];
+export function closeMenu(level = 0) { while (menus.length > level) menus.pop().remove(); }
+export function menu(items, at, opts = {}) {
+  const level = opts.level || 0;
+  closeMenu(level);
   const m = document.createElement('div');
-  m.className = 'menu';
+  m.className = 'menu' + (opts.cls ? ' ' + opts.cls : '');
   m.innerHTML = items.map((it, i) => it === '-' ? '<div class="msep"></div>'
-    : it.html ? `<div class="mhtml">${it.html}</div>`
-    : `<button class="mi" data-i="${i}" ${it.disabled ? 'disabled' : ''}>${it.icon ? `<span class="ms">${it.icon}</span>` : '<span class="ms"></span>'}<span class="mt">${it.label}</span>${it.hint ? `<span class="mh">${it.hint}</span>` : ''}</button>`).join('');
+    : it.search ? `<div class="msearch"><input placeholder="${it.search}" spellcheck="false"></div>`
+    : it.title ? `<div class="mtitle">${it.icon ? `<span class="ms">${it.icon}</span>` : ''}<b>${it.title}</b></div>`
+    : it.html ? `<div class="mhtml" data-i="${i}">${it.html}</div>`
+    : `<button class="mi${it.sub ? ' hasub' : ''}" data-i="${i}" ${it.disabled ? 'disabled' : ''}>${it.icon ? `<span class="ms">${it.icon}</span>` : '<span class="ms"></span>'}<span class="mt">${it.label}</span>${it.hint ? `<span class="mh">${it.hint}</span>` : ''}${it.sub ? '<span class="ms marrow">chevron_right</span>' : ''}</button>`).join('');
   document.body.appendChild(m);
   let x, y;
   if (at instanceof Element) { const r = at.getBoundingClientRect(); x = r.left; y = r.bottom + 2; } else { x = at.x; y = at.y; }
   const mr = m.getBoundingClientRect();
+  if (level > 0 && x + mr.width > innerWidth - 4) x = Math.max(4, (opts.leftEdge ?? x) - mr.width);
   x = Math.max(4, Math.min(x, innerWidth - mr.width - 4));
   if (y + mr.height > innerHeight - 4) y = Math.max(4, innerHeight - mr.height - 4);
   m.style.left = x + 'px'; m.style.top = y + 'px';
-  m.addEventListener('mousedown', e => e.preventDefault());
+  m.addEventListener('mousedown', e => { if (!e.target.closest('input')) e.preventDefault(); });
+  const openSub = b => {
+    const it = items[+b.dataset.i]; if (!it || !it.sub) return;
+    const r = b.getBoundingClientRect();
+    menu(typeof it.sub === 'function' ? it.sub() : it.sub, { x: r.right - 2, y: r.top - 5 }, { level: level + 1, leftEdge: r.left + 2 });
+  };
+  m.addEventListener('mouseover', e => {
+    const b = e.target.closest('.mi'); if (!b || b.disabled) return;
+    if (b.classList.contains('hasub')) { if (menus[level + 1]?.dataset.from !== b.dataset.i) { openSub(b); if (menus[level + 1]) menus[level + 1].dataset.from = b.dataset.i; } }
+    else closeMenu(level + 1);
+  });
   m.addEventListener('click', e => {
     const b = e.target.closest('.mi'); if (!b) return;
-    const it = items[+b.dataset.i]; closeMenu(); it.run && it.run();
+    const it = items[+b.dataset.i];
+    if (it.sub) { openSub(b); return; }
+    closeMenu(0); it.run && it.run();
   });
-  openMenu = m;
+  items.forEach((it, i) => { if (it && it.bind) { const el = m.querySelector(`.mhtml[data-i="${i}"]`); if (el) it.bind(el, () => closeMenu(0)); } });
+  const search = m.querySelector('.msearch input');
+  if (search) {
+    search.addEventListener('input', () => {
+      const q = search.value.trim().toLowerCase();
+      m.querySelectorAll('.mi').forEach(b => { b.style.display = !q || b.textContent.toLowerCase().includes(q) ? '' : 'none'; });
+      m.querySelectorAll('.msep,.mtitle,.mhtml').forEach(el => { el.style.display = q ? 'none' : ''; });
+    });
+    search.addEventListener('keydown', e => {
+      if (e.key === 'Enter') { const b = [...m.querySelectorAll('.mi')].find(x => x.style.display !== 'none' && !x.disabled); if (b) b.click(); }
+      if (e.key === 'Escape') closeMenu(0);
+      e.stopPropagation();
+    });
+  }
+  menus[level] = m;
   return m;
 }
-document.addEventListener('mousedown', e => { if (openMenu && !openMenu.contains(e.target)) closeMenu(); }, true);
-document.addEventListener('keydown', e => { if (e.key === 'Escape') closeMenu(); }, true);
+document.addEventListener('mousedown', e => { if (menus.length && !menus.some(m => m.contains(e.target))) closeMenu(0); }, true);
+document.addEventListener('keydown', e => { if (e.key === 'Escape' && menus.length) closeMenu(0); }, true);
 
-export function dialog({ title, text = '', input = null, ok = 'Aceptar', cancel = 'Cancelar', html = '', hero = false }) {
+export function dialog({ title, text = '', input = null, ok = 'Aceptar', cancel = 'Cancelar', html = '', hero = false, collect = null }) {
   return new Promise(resolve => {
     const d = document.createElement('div');
     d.className = 'modal' + (hero ? ' hero' : '');
@@ -180,11 +211,11 @@ export function dialog({ title, text = '', input = null, ok = 'Aceptar', cancel 
       <div class="mbtns">${cancel ? `<button class="mb2">${cancel}</button>` : ''}<button class="mb1">${ok}</button></div></div>`;
     document.body.appendChild(d);
     const inp = d.querySelector('.min');
-    const done = v => { d.remove(); resolve(v); };
+    const done = v => { if (v !== null && collect) v = collect(d); d.remove(); resolve(v); };
     d.querySelector('.mb1').onclick = () => done(inp ? inp.value : true);
     const c = d.querySelector('.mb2'); if (c) c.onclick = () => done(null);
     d.addEventListener('keydown', e => {
-      if (e.key === 'Enter') { e.preventDefault(); done(inp ? inp.value : true); }
+      if (e.key === 'Enter' && e.target.tagName !== 'SELECT') { e.preventDefault(); done(inp ? inp.value : true); }
       if (e.key === 'Escape' && cancel) { e.preventDefault(); done(null); }
       e.stopPropagation();
     });
