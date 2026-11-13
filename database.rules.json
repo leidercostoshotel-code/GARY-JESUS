@@ -1,0 +1,10 @@
+{
+  "rules": {
+    "libros": {
+      "$libro": {
+        ".read": "auth != null",
+        ".write": "auth != null"
+      }
+    }
+  }
+}

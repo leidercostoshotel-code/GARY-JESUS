@@ -1,0 +1,17 @@
+{
+  "name": "Excel del Hotel",
+  "short_name": "Excel Hotel",
+  "description": "Hojas de cálculo compartidas en tiempo real (Firebase)",
+  "lang": "es",
+  "start_url": "./index.html",
+  "scope": "./",
+  "display": "standalone",
+  "display_override": ["window-controls-overlay", "standalone"],
+  "background_color": "#217346",
+  "theme_color": "#217346",
+  "icons": [
+    { "src": "icons/icon-192.png", "sizes": "192x192", "type": "image/png" },
+    { "src": "icons/icon-512.png", "sizes": "512x512", "type": "image/png" },
+    { "src": "icons/icon-maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ]
+}
