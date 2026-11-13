@@ -65,8 +65,8 @@ function getBook() {
 
 // Libros del repositorio: se cargan solos en Firebase la primera vez que alguien los abre
 const LIBROS = [
-  { id: 'pedido-bodegas-2024', nombre: 'PEDIDO BODEGAS 2024', archivo: 'PEDIDO BODEGAS 2024.xlsx', icon: 'inventory_2', desc: 'Pedidos semanales de bodega, vencimientos, centros de costo' },
-  { id: 'pedido-cocina-2024', nombre: 'PEDIDO DE COCINA 2024', archivo: 'PEDIDO DE COCINA 2024 - copia.xlsx', icon: 'restaurant', desc: 'Pedidos diarios de cocina por proveedor' }
+  { id: 'pedido-bodegas-2024', nombre: 'PEDIDO BODEGAS 2024', archivo: 'PEDIDO BODEGAS 2024.xlsx', baseId: '1lnxnsq2fi', icon: 'inventory_2', desc: 'Pedidos semanales de bodega, vencimientos, centros de costo' },
+  { id: 'pedido-cocina-2024', nombre: 'PEDIDO DE COCINA 2024', archivo: 'PEDIDO DE COCINA 2024 - copia.xlsx', baseId: 'qccjcx9wor', icon: 'restaurant', desc: 'Pedidos diarios de cocina por proveedor' }
 ];
 const libroById = id => LIBROS.find(l => l.id === id);
 
@@ -844,7 +844,10 @@ async function deleteSheet(sid) {
   const ok = await dialog({ title: 'Eliminar hoja', text: `¿Eliminar la hoja "${esc(S.tree.hojas[sid].nombre)}" para todos los usuarios? Puedes deshacer con Ctrl+Z.`, ok: 'Eliminar' });
   if (!ok) return focusGrid();
   const list = sortedSheets().map(x => x[0]), i = list.indexOf(sid);
-  write({ ['hojas/' + sid]: null, ['celdas/' + sid]: null });
+  const orig = S.tree.hojas[sid].origen || (/^s\d{3}$/.test(sid) ? S.tree.hojas[sid].nombre : null);
+  const del = { ['hojas/' + sid]: null, ['celdas/' + sid]: null, ['bases/' + sid]: null };
+  if (orig) del[`meta/borradas/${fnv(orig.toLowerCase())}`] = true;
+  write(del);
   if (sid === S.sid) switchSheet(list[i + 1] || list[i - 1]);
   focusGrid();
 }
@@ -895,6 +898,7 @@ function loadXLSX() {
   if (!xlsxP) xlsxP = new Promise((res, rej) => {
     const s = document.createElement('script');
     s.src = 'https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js';
+    s.charset = 'utf-8';
     s.onload = () => res(window.XLSX); s.onerror = () => { xlsxP = null; rej(new Error('No se pudo cargar el lector de Excel (¿sin internet?)')); };
     document.head.appendChild(s);
   });
@@ -922,10 +926,12 @@ async function seedBook(lb) {
   box.innerHTML = `<div class="lbox2"><span class="spin"></span><b>Preparando ${esc(lb.nombre)}</b><span id="loadmsg">Descargando el archivo…</span></div>`;
   document.body.appendChild(box);
   try {
-    const r = await fetch(encodeURI(lb.archivo));
+    const r = await fetch(encodeURI(lb.archivo), { cache: 'no-cache' });
     if (!r.ok) throw new Error('No se encontró el archivo ' + lb.archivo);
-    await importBuffer(await r.arrayBuffer(), true, (i, n) => { const m = document.getElementById('loadmsg'); if (m) m.textContent = `Guardando hoja ${i} de ${n} en la nube…`; });
-    await write({ 'meta/nombre': lb.nombre, 'meta/importado': new Date().toISOString(), 'meta/estilos': STYLE_VERSION }, false);
+    const tag = r.headers.get('etag') || r.headers.get('last-modified') || '';
+    const buf = await r.arrayBuffer();
+    await importBuffer(buf, true, (i, n) => { const m = document.getElementById('loadmsg'); if (m) m.textContent = `Guardando hoja ${i} de ${n} en la nube…`; });
+    await write({ 'meta/nombre': lb.nombre, 'meta/archivo': fileId(buf), 'meta/archivoEtag': tag, 'meta/importado': new Date().toISOString(), 'meta/estilos': STYLE_VERSION }, false);
   } catch (e) {
     toast('No se pudo cargar el libro: ' + e.message, 'err', 10000);
     write({ 'hojas/h1': { nombre: 'Hoja1', orden: 0 } }, false); switchSheet('h1');
@@ -980,7 +986,7 @@ async function upgradeStyles(lb) {
   if (upgrading) return; upgrading = true;
   try {
     const X = await loadXLSX();
-    const r = await fetch(encodeURI(lb.archivo)); if (!r.ok) return;
+    const r = await fetch(encodeURI('datos/base/' + lb.archivo), { cache: 'no-cache' }); if (!r.ok) return;
     const { wb, fmt } = readWorkbook(X, await r.arrayBuffer());
     U.sinfo.textContent = 'Aplicando el formato del Excel original…';
     let idx = 0;
@@ -1000,10 +1006,100 @@ async function upgradeStyles(lb) {
     toast('Se aplicaron los bordes y el formato del Excel original', 'ok');
   } catch (e) { console.warn(e); } finally { upgrading = false; }
 }
-function maybeUpgrade() {
+// Mantenimiento al abrir un libro del hotel: formato original (una vez) y cambios del archivo Excel
+let maintained = false;
+async function maybeUpgrade() {
   const lb = libroById(S.book);
-  if (!lb || !S.ready || !S.metaLoaded || !sortedSheets().length) return;
-  if ((S.tree.meta.estilos || 0) < STYLE_VERSION && S.tree.meta.importado) upgradeStyles(lb);
+  if (!lb || maintained || !S.ready || !S.metaLoaded || !sortedSheets().length || !S.tree.meta.importado) return;
+  maintained = true;
+  try {
+    if ((S.tree.meta.estilos || 0) < STYLE_VERSION) await upgradeStyles(lb);
+    await checkFileUpdate(lb);
+  } catch (e) { console.warn(e); U.sinfo.textContent = ''; }
+}
+
+// ---------- huellas: permiten actualizar solo lo que cambió
+function fnv(str) { let h = 0x811c9dc5; for (let i = 0; i < str.length; i++) { h ^= str.charCodeAt(i); h = Math.imul(h, 0x01000193); } return (h >>> 0).toString(36); }
+function fileId(buf) { const u = new Uint8Array(buf); let h = 0x811c9dc5; for (let i = 0; i < u.length; i++) { h ^= u[i]; h = Math.imul(h, 0x01000193); } return (h >>> 0).toString(36) + u.length.toString(36); }
+function fingerprint(cells, anchos, altos) {
+  const hashes = {}; let acc = '';
+  for (const k of Object.keys(cells).sort()) { const h = fnv(JSON.stringify(cells[k])); hashes[k] = h; acc += k + h; }
+  const dims = fnv(JSON.stringify([anchos, altos]));
+  return { hashes, dims, huella: fnv(acc + '|' + dims) + Object.keys(hashes).length.toString(36) };
+}
+const orNull = o => (o && Object.keys(o).length ? o : null);
+
+// ¿Se subió una versión nueva del Excel? Primero pregunta solo la cabecera (sin descargar el archivo).
+async function checkFileUpdate(lb) {
+  const url = encodeURI(lb.archivo);
+  let tag = '';
+  try { const h = await fetch(url, { method: 'HEAD', cache: 'no-cache' }); if (h.ok) tag = h.headers.get('etag') || h.headers.get('last-modified') || ''; } catch { /* sin red */ }
+  if (tag && tag === S.tree.meta.archivoEtag) return;
+  const r = await fetch(url, { cache: 'no-cache' }); if (!r.ok) return;
+  const buf = await r.arrayBuffer(), id = fileId(buf);
+  const known = S.tree.meta.archivo || lb.baseId;
+  if (id !== known) await syncBook(buf, lb);
+  await write({ 'meta/archivo': id, 'meta/archivoEtag': tag || null }, false);
+}
+
+// Sincroniza el libro con un Excel: compara hoja por hoja (huella) y celda por celda (contra la versión anterior
+// del archivo). Solo escribe lo que el Excel cambió; lo editado en la página en otras celdas se respeta.
+let syncing = false;
+async function syncBook(buf, lb) {
+  if (syncing) return; syncing = true;
+  try {
+    const X = await loadXLSX();
+    const { wb, fmt } = readWorkbook(X, buf);
+    let baseWb = null;
+    const getBase = async () => {
+      if (baseWb !== null) return baseWb;
+      baseWb = false;
+      if (lb) { try { const r = await fetch(encodeURI('datos/base/' + lb.archivo), { cache: 'no-cache' }); if (r.ok) baseWb = readWorkbook(X, await r.arrayBuffer()); } catch { /* sin copia */ } }
+      return baseWb;
+    };
+    const borradas = S.tree.meta.borradas || {};
+    let hojasCambiadas = 0, celdas = 0, nuevas = 0, idx = 0, prevOrden = -1;
+    for (const name of wb.SheetNames) {
+      idx++;
+      const ws = wb.Sheets[name]; if (!ws) continue;
+      U.sinfo.textContent = `Revisando el Excel: hoja ${idx} de ${wb.SheetNames.length}…`;
+      const { cells, anchos, altos } = sheetCells(X, ws, fmt[name]);
+      const fp = fingerprint(cells, anchos, altos);
+      const ln = name.toLowerCase(), list = sortedSheets();
+      const hit = list.find(([, h]) => (h.origen || '').toLowerCase() === ln) || list.find(([, h]) => !h.origen && (h.nombre || '').toLowerCase() === ln);
+      if (!hit) {
+        if (borradas[fnv(ln)]) continue; // la borraron en la página: no se vuelve a crear
+        const sid = 'x' + fnv(ln), orden = prevOrden + 0.001;
+        const meta = { nombre: uniqueName(name), orden, origen: name, huella: fp.huella, dims: fp.dims };
+        if (orNull(anchos)) meta.anchos = anchos; if (orNull(altos)) meta.altos = altos;
+        S.tree.hojas[sid] = meta;
+        await write({ ['hojas/' + sid]: meta, ['celdas/' + sid]: orNull(cells), ['bases/' + sid]: orNull(fp.hashes) }, false);
+        nuevas++; prevOrden = orden; continue;
+      }
+      const [sid, h] = hit;
+      prevOrden = h.orden ?? prevOrden;
+      if (h.huella === fp.huella) continue; // hoja sin cambios: ni se lee
+      let base = await store.read('bases/' + sid), baseDims = h.dims;
+      if (!base) {
+        const bw = await getBase(), bws = bw && bw.wb.Sheets[name];
+        if (bws) { const b = sheetCells(X, bws, bw.fmt[name]), bf = fingerprint(b.cells, b.anchos, b.altos); base = bf.hashes; baseDims = bf.dims; }
+        else base = {};
+      }
+      const upd = {}; let n = 0;
+      for (const k of new Set([...Object.keys(fp.hashes), ...Object.keys(base)])) {
+        if (fp.hashes[k] === base[k]) continue;
+        upd[`celdas/${sid}/${k}`] = cells[k] || null; n++;
+      }
+      if (fp.dims !== baseDims) { upd[`hojas/${sid}/anchos`] = orNull(anchos); upd[`hojas/${sid}/altos`] = orNull(altos); }
+      Object.assign(upd, { [`hojas/${sid}/huella`]: fp.huella, [`hojas/${sid}/dims`]: fp.dims, [`hojas/${sid}/origen`]: name, ['bases/' + sid]: orNull(fp.hashes) });
+      await write(upd, false);
+      if (n) { hojasCambiadas++; celdas += n; }
+    }
+    U.sinfo.textContent = '';
+    if (hojasCambiadas || nuevas) toast(`Excel actualizado: ${celdas.toLocaleString('es-PE')} celdas cambiadas en ${hojasCambiadas} hojas${nuevas ? `, ${nuevas} hojas nuevas` : ''}. El resto quedó igual.`, 'ok', 8000);
+    else toast('El Excel no tiene cambios respecto a la nube.', 'info');
+    renderTabs();
+  } finally { syncing = false; U.sinfo.textContent = ''; }
 }
 async function importBuffer(buf, seed, progress) {
   let X;
@@ -1018,8 +1114,10 @@ async function importBuffer(buf, seed, progress) {
     const meta = { nombre: seed ? name : uniqueName(name), orden: order++ };
     if (Object.keys(anchos).length) meta.anchos = anchos;
     if (Object.keys(altos).length) meta.altos = altos;
+    const upd = { ['hojas/' + sid]: meta, ['celdas/' + sid]: Object.keys(cells).length ? cells : null };
+    if (seed) { const fp = fingerprint(cells, anchos, altos); Object.assign(meta, { origen: name, huella: fp.huella, dims: fp.dims }); upd['bases/' + sid] = Object.keys(fp.hashes).length ? fp.hashes : null; }
     S.tree.hojas[sid] = meta; // reserva el nombre para la siguiente hoja
-    await write({ ['hojas/' + sid]: meta, ['celdas/' + sid]: Object.keys(cells).length ? cells : null }, false);
+    await write(upd, false);
     total += Object.keys(cells).length;
     if (!first) { first = sid; if (seed) switchSheet(sid); }
   }
@@ -1272,7 +1370,9 @@ const CMD = {
   fnMenu: at => fnMenu(at),
   showFormulas: () => { S.showF = !S.showF; dataDirty = true; schedule(); refreshRibbon(); },
   recalc: () => { calc.reset(); dataDirty = true; schedule(); toast('Recalculado'); },
-  import: () => U.file.click(), exportXlsx, exportCsv, print: printSheet,
+  import: () => { U.file.dataset.mode = ''; U.file.click(); },
+  syncFile: () => { U.file.dataset.mode = 'sync'; U.file.click(); },
+  exportXlsx, exportCsv, print: printSheet,
   zoomIn: () => zoom(S.z + 0.1), zoomOut: () => zoom(S.z - 0.1), zoom100: () => zoom(1),
   grid: () => { S.grid = !S.grid; lsSet('xw-grid', S.grid ? '1' : '0'); U.gw.classList.toggle('nogrid', !S.grid); refreshRibbon(); },
   fullscreen: () => { if (document.fullscreenElement) document.exitFullscreen(); else document.documentElement.requestFullscreen?.(); },
@@ -1375,7 +1475,13 @@ function bindUI() {
     const n = (await dialog({ title: 'Nombre del libro', input: S.tree.meta.nombre || 'Libro1' }))?.trim();
     if (n) write({ 'meta/nombre': n }); focusGrid();
   });
-  file.addEventListener('change', () => { const f = file.files[0]; file.value = ''; if (f) importFile(f).catch(e => toast('No se pudo importar: ' + e.message, 'err')); });
+  file.addEventListener('change', async () => {
+    const f = file.files[0]; file.value = ''; if (!f) return;
+    try {
+      if (file.dataset.mode === 'sync') { toast('Comparando ' + f.name + ' con la nube…'); await loadXLSX(); await syncBook(await f.arrayBuffer(), libroById(S.book)); }
+      else await importFile(f);
+    } catch (e) { toast('No se pudo leer el archivo: ' + e.message, 'err'); }
+  });
 
   // ---- scroll / tamaño
   gw.addEventListener('scroll', () => { schedule(); savePos(); }, { passive: true });
