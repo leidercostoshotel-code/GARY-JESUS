@@ -118,6 +118,7 @@ async function init() {
   } catch (e) {
     console.error(e);
     setCloud({ mode: 'error' });
+    if (!e || !e.code) toast('No se pudo cargar Firebase. Revisa tu conexión a internet y recarga la página.', 'err', 12000);
     return;
   }
   U.ed.focus();

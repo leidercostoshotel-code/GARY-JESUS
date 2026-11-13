@@ -10,7 +10,7 @@
 import { firebaseConfig } from './firebase-config.js';
 
 const SDK = 'https://www.gstatic.com/firebasejs/10.12.2/';
-export const usingFirebase = () => !!(firebaseConfig && firebaseConfig.apiKey && firebaseConfig.databaseURL);
+export const usingFirebase = () => !!(firebaseConfig && firebaseConfig.apiKey && (firebaseConfig.databaseURL || firebaseConfig.projectId));
 
 const clone = v => (v == null ? null : JSON.parse(JSON.stringify(v)));
 export function getIn(obj, path) {
@@ -121,7 +121,8 @@ async function firebaseStore(book, h) {
     import(SDK + 'firebase-app.js'), import(SDK + 'firebase-database.js'), import(SDK + 'firebase-auth.js')
   ]);
   const { ref, child, onValue, onChildAdded, onChildChanged, onChildRemoved, update, set, onDisconnect, serverTimestamp } = dbM;
-  const app = appM.initializeApp(firebaseConfig);
+  const cfg = { ...firebaseConfig, databaseURL: firebaseConfig.databaseURL || `https://${firebaseConfig.projectId}-default-rtdb.firebaseio.com` };
+  const app = appM.initializeApp(cfg);
   const auth = authM.getAuth(app);
   let user;
   try { user = (await authM.signInAnonymously(auth)).user; }
@@ -132,6 +133,10 @@ async function firebaseStore(book, h) {
   const OUTBOX = 'excelweb-outbox:' + book;
   let connected = false, pending = 0, myPres = null;
   const status = () => h.onStatus({ mode: 'firebase', connected, pending });
+  let everConnected = false;
+  setTimeout(() => {
+    if (!everConnected) h.onError('No se pudo conectar con Firebase Realtime Database. En la consola de Firebase entra a Compilación → Realtime Database → Crear base de datos, y revisa que "databaseURL" en js/firebase-config.js sea la que aparece allí.');
+  }, 15000);
 
   // Cola de cambios pendientes: si se cierra la página sin conexión, se reenvían al volver.
   const readOutbox = () => { try { return JSON.parse(localStorage.getItem(OUTBOX) || '[]'); } catch { return []; } };
@@ -148,7 +153,7 @@ async function firebaseStore(book, h) {
 
   const presRef = child(root, 'presencia/' + me);
   onValue(ref(db, '.info/connected'), s => {
-    connected = !!s.val(); status();
+    connected = !!s.val(); if (connected) everConnected = true; status();
     if (connected) {
       onDisconnect(presRef).remove();
       if (myPres) set(presRef, { ...myPres, ts: serverTimestamp() });
