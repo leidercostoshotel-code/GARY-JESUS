@@ -668,6 +668,20 @@ export function shiftFormula(raw, dr, dc) {
     return bad ? '#REF!' : pre + parts.map(fmtPart).join(':');
   });
 }
+// Transponer (Pegado especial): la referencia que estaba a (dr, dc) de la celda origen pasa a (dc, dr) del destino
+export function transposeFormula(raw, sr, sc, tr, tc) {
+  return mapRefs(raw, (t, pre, parts) => {
+    let bad = false;
+    for (const p of parts) {
+      if (p.r === null) { if (!p.ac) p.c += tc - sc; continue; }
+      const dr = p.r - sr, dc = p.c - sc;
+      if (!p.ar && !p.ac) { p.r = tr + dc; p.c = tc + dr; }
+      else { if (!p.ar) p.r += tr - sr; if (!p.ac) p.c += tc - sc; }
+      if (p.r < 0 || p.c < 0) bad = true;
+    }
+    return bad ? '#REF!' : pre + parts.map(fmtPart).join(':');
+  });
+}
 // Insertar (n>0) o eliminar (n<0) filas/columnas
 export function adjustRefs(raw, ownSheet, target, axis, at, n) {
   const tl = target.toLowerCase();

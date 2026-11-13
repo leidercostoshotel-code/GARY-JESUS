@@ -3,7 +3,7 @@
 // =====================================================================
 import { createStore, usingFirebase, getIn } from './store.js';
 import {
-  Calc, colName, keyOf, parseKey, display, shiftFormula, adjustRefs, renameSheetRefs, parseDate,
+  Calc, colName, keyOf, parseKey, display, shiftFormula, transposeFormula, adjustRefs, renameSheetRefs, parseDate, quoteSheet,
   formulaRefs, toEnglish, FUNCTION_LIST, FErr, compareValues, todaySerial, nowSerial, tokenize, fmtGeneral
 } from './formulas.js';
 import { buildUI, menu, closeMenu, dialog, FONTS, SIZES } from './ui.js';
@@ -205,8 +205,14 @@ function ensureSheet() {
     switchSheet('h1');
     return;
   }
+  const hp = new URLSearchParams(location.hash.slice(1)), hoja = hp.get('hoja'), celda = (hp.get('celda') || '').toUpperCase();
   const saved = lsGet('xw-sheet:' + S.book);
-  switchSheet(S.tree.hojas[saved] ? saved : list[0][0]);
+  switchSheet(S.tree.hojas[hoja] ? hoja : S.tree.hojas[saved] ? saved : list[0][0]);
+  if (hoja && celda) {
+    history.replaceState(null, '', '#libro=' + S.book);
+    const m = /^([A-Z]+\d+)(?::([A-Z]+\d+))?$/.exec(celda);
+    if (m) { const a = parseKey(m[1]), b = parseKey(m[2] || m[1]); S.pendingScroll = null; S.extraRows = Math.max(a.r, b.r) + 200; geom(); select(a.r, a.c, b.r, b.c); }
+  }
   maybeUpgrade();
 }
 
@@ -339,7 +345,8 @@ function renderCells(r0, r1, c0, c1) {
       if (s.va) st += `align-items:${s.va === 't' ? 'flex-start' : s.va === 'm' ? 'center' : 'flex-end'};`;
       let cls = 'c' + extra + cov;
       if (s.w) cls += ' wr';
-      out.push(`<div class="${cls}" style="${st}">${esc(d.t)}</div>`);
+      if (s.nt) cls += ' nt';
+      out.push(`<div class="${cls}" style="${st}"${s.nt ? ` title="${esc(s.nt)}"` : ''}>${esc(d.t)}</div>`);
     }
   }
   U.cells.innerHTML = out.join('');
@@ -675,40 +682,82 @@ function htmlRows(html) {
   }
   return rows.length ? rows : null;
 }
-function doPaste(text, html) {
+// Valor calculado como texto para "Pegar valores"
+function valueRaw(v) {
+  if (v == null) return '';
+  if (v instanceof FErr) return v.code;
+  if (typeof v === 'boolean') return v ? 'VERDADERO' : 'FALSO';
+  if (typeof v === 'number') return String(v);
+  return /^[=']/.test(v) || /^[-+]?\d/.test(v) ? "'" + v : v;
+}
+// Modos de pegado como en Excel: all (todo), values, formulas, formats, transpose, link
+function doPaste(text, html, mode = 'all') {
   const R = rng(), upd = {}, cells = cellsOf(S.sid);
   const norm = s => (s || '').replace(/\r\n?/g, '\n').replace(/\n$/, '');
   const clip = S.clip;
-  if (clip && norm(text) === norm(clip.text)) {
-    const h = clip.m.length, w = clip.m[0].length;
+  if (clip && (text == null || norm(text) === norm(clip.text))) {
+    const T = mode === 'transpose';
+    const h = T ? clip.m[0].length : clip.m.length, w = T ? clip.m.length : clip.m[0].length;
     const th = (R.r2 - R.r1 + 1) % h === 0 ? R.r2 - R.r1 + 1 : h, tw = (R.c2 - R.c1 + 1) % w === 0 ? R.c2 - R.c1 + 1 : w;
-    if (clip.cut) {
-      for (let r = clip.r1; r <= clip.r2; r++) for (let c = clip.c1; c <= clip.c2; c++) upd[`celdas/${clip.sid}/${keyOf(r, c)}`] = null;
-    }
+    const move = clip.cut && mode === 'all';
+    if (move) for (let r = clip.r1; r <= clip.r2; r++) for (let c = clip.c1; c <= clip.c2; c++) upd[`celdas/${clip.sid}/${keyOf(r, c)}`] = null;
+    const srcSheet = S.tree.hojas[clip.sid]?.nombre || '';
     for (let i = 0; i < th; i++) for (let j = 0; j < tw; j++) {
-      const src = clip.m[i % h][j % w], r = R.r1 + i, c = R.c1 + j;
-      let v = src?.v;
-      if (v && !clip.cut) v = shiftFormula(v, r - (clip.r1 + i % h), c - (clip.c1 + j % w));
-      upd[`celdas/${S.sid}/${keyOf(r, c)}`] = src ? cellObj(v, src.s) : null;
+      const si = T ? j % w : i % h, sj = T ? i % h : j % w;
+      const src = clip.m[si][sj], r = R.r1 + i, c = R.c1 + j, sr = clip.r1 + si, sc = clip.c1 + sj;
+      const k = keyOf(r, c), old = cells[k];
+      let v = src?.v, s = src?.s;
+      if (v && !move && v[0] === '=') v = T ? transposeFormula(v, sr, sc, r, c) : shiftFormula(v, r - sr, c - sc);
+      if (mode === 'values') { v = valueRaw(calc.value(clip.sid, sr, sc)); s = old?.s; }
+      else if (mode === 'formulas') s = old?.s;
+      else if (mode === 'formats') { v = old?.v; s = src?.s; }
+      else if (mode === 'link') { v = '=' + (clip.sid !== S.sid ? quoteSheet(srcSheet) + '!' : '') + keyOf(sr, sc); s = old?.s; }
+      const o = cellObj(v, s);
+      upd[`celdas/${S.sid}/${k}`] = o;
+      if (mode !== 'all' && !src && old) upd[`celdas/${S.sid}/${k}`] = mode === 'formats' ? cellObj(old.v, null) : cellObj(v, old.s);
     }
-    if (clip.cut) S.clip = null;
+    if (move) S.clip = null;
     write(upd);
     select(R.r1, R.c1, R.r1 + th - 1, R.c1 + tw - 1, false);
     return;
   }
+  if (mode === 'formats' || mode === 'link') return toast('Esa opción de pegado solo está disponible para celdas copiadas de esta hoja de cálculo.');
   const hrows = htmlRows(html);
-  const rows = hrows || parseTSV(text).map(r => r.map(t => ({ t })));
+  let rows = hrows || parseTSV(text || '').map(r => r.map(t => ({ t })));
   if (!rows.length) return;
+  if (mode === 'transpose') { const n = Math.max(...rows.map(r => r.length)); rows = Array.from({ length: n }, (_, j) => rows.map(r => r[j] || { t: '' })); }
   rows.forEach((row, i) => row.forEach((x, j) => {
     const k = keyOf(R.r1 + i, R.c1 + j), old = cells[k];
     const clean = String(x.t ?? '').replace(/\u00a0/g, ' ').replace(/\r/g, '').trim();
     const { v, s } = normalizeInput(clean, old?.s);
-    if (x.b) s.b = 1;
+    if (x.b && mode === 'all') s.b = 1;
     if (clean.includes('\n')) s.w = 1;
     upd[`celdas/${S.sid}/${k}`] = cellObj(v, s);
   }));
   write(upd);
   select(R.r1, R.c1, R.r1 + rows.length - 1, R.c1 + Math.max(...rows.map(r => r.length)) - 1, false);
+}
+// Pegar desde el menú (clic derecho o cinta): lee el portapapeles del sistema si el navegador lo permite
+async function pasteMode(mode = 'all') {
+  let text = null, html = null;
+  try {
+    if (navigator.clipboard.read) {
+      for (const item of await navigator.clipboard.read()) {
+        if (item.types.includes('text/plain')) text = await (await item.getType('text/plain')).text();
+        if (item.types.includes('text/html')) html = await (await item.getType('text/html')).text();
+      }
+    } else text = await navigator.clipboard.readText();
+  } catch { /* sin permiso: usa lo copiado en esta página */ }
+  if (text == null && !S.clip) return toast('El navegador no dejó leer el portapapeles. Usa Ctrl+V para pegar.');
+  doPaste(text, html, mode);
+}
+// Insertar celdas copiadas: abre filas y pega
+function insertCopied() {
+  if (!S.clip) return toast('Primero copia celdas de la hoja (Ctrl+C).');
+  const h = S.clip.m.length, R = rng();
+  shiftStructure('r', R.r1, h);
+  select(R.r1, R.c1, R.r1, R.c1, false);
+  doPaste(null, null, 'all');
 }
 
 // ================================================================== RELLENAR (controlador de relleno)
@@ -1261,23 +1310,112 @@ function applyColor(kind, col) {
   if (kind === 'fill') { S.fillColor = col; U.fillBar.style.background = col; styleSel(s => ({ ...s, f: col })); }
   else { S.fontColor = col; U.colorBar.style.background = col; styleSel(s => ({ ...s, c: col })); }
 }
+const PASTE_OPTS = [
+  ['all', '', 'Pegar (P)'], ['values', '123', 'Valores (V)'], ['formulas', 'fx', 'Fórmulas (F)'],
+  ['transpose', '⇄', 'Transponer (T)'], ['formats', '%', 'Formato (R)'], ['link', '🔗', 'Pegar vínculo (N)']
+];
+const pasteIconsHtml = () => `<div class="pasteopts">${PASTE_OPTS.map(([m, b, t]) => `<button class="pi" data-pm="${m}" title="${t}"><span class="ms">content_paste</span>${b ? `<i>${b}</i>` : ''}</button>`).join('')}</div>`;
+const bindPaste = (el, close) => el.querySelectorAll('.pi').forEach(b => b.addEventListener('click', () => { close(); pasteMode(b.dataset.pm); }));
+function pasteSpecialItems() {
+  return [
+    { title: 'Pegar' },
+    { icon: 'content_paste', label: 'Pegar', run: () => pasteMode('all') },
+    { icon: 'function', label: 'Fórmulas', run: () => pasteMode('formulas') },
+    { icon: 'swap_horiz', label: 'Transponer', run: () => pasteMode('transpose') },
+    { title: 'Pegar valores' },
+    { icon: 'pin', label: 'Valores', run: () => pasteMode('values') },
+    { title: 'Otras opciones de pegado' },
+    { icon: 'format_paint', label: 'Formato', run: () => pasteMode('formats') },
+    { icon: 'link', label: 'Pegar vínculo', run: () => pasteMode('link') }
+  ];
+}
 function cellMenu(x, y) {
+  const st = activeStyle();
   menu([
+    { search: 'Buscar en los menús' },
     { icon: 'content_cut', label: 'Cortar', hint: 'Ctrl+X', run: () => doCopy(true) },
     { icon: 'content_copy', label: 'Copiar', hint: 'Ctrl+C', run: () => doCopy(false) },
-    { icon: 'content_paste', label: 'Pegar', hint: 'Ctrl+V', run: pasteFromButton },
+    { title: 'Opciones de pegado:', icon: 'content_paste' },
+    { html: pasteIconsHtml(), bind: bindPaste },
+    { icon: '', label: 'Pegado especial…', hint: 'Ctrl+Alt+V', sub: pasteSpecialItems },
     '-',
-    { icon: 'table_rows', label: 'Insertar filas arriba', run: insRows },
-    { icon: 'view_week', label: 'Insertar columnas a la izquierda', run: insCols },
-    { icon: 'delete_sweep', label: 'Eliminar filas', run: delRows },
-    { icon: 'delete', label: 'Eliminar columnas', run: delCols },
+    { icon: 'add_row_above', label: 'Insertar celdas copiadas…', disabled: !S.clip, run: insertCopied },
+    { icon: '', label: 'Insertar…', sub: [
+      { icon: 'table_rows', label: 'Filas arriba', run: insRows }, { icon: 'view_week', label: 'Columnas a la izquierda', run: insCols }] },
+    { icon: '', label: 'Eliminar…', sub: [
+      { icon: 'delete_sweep', label: 'Toda la fila', run: delRows }, { icon: 'delete', label: 'Toda la columna', run: delCols }] },
+    { icon: '', label: 'Borrar contenido', hint: 'Supr', run: () => clearSel('content') },
     '-',
-    { icon: 'ink_eraser', label: 'Borrar contenido', hint: 'Supr', run: () => clearSel('content') },
-    { icon: 'format_clear', label: 'Borrar formatos', run: () => clearSel('fmt') },
+    { icon: 'bolt', label: 'Análisis rápido', disabled: true },
+    { icon: '', label: 'Filtrar', disabled: true, sub: [] },
+    { icon: '', label: 'Ordenar', sub: [
+      { icon: 'north', label: 'Ordenar de A a Z', run: () => sortSel(false) }, { icon: 'south', label: 'Ordenar de Z a A', run: () => sortSel(true) }] },
     '-',
-    { icon: 'north', label: 'Ordenar de A a Z', run: () => sortSel(false) },
-    { icon: 'south', label: 'Ordenar de Z a A', run: () => sortSel(true) }
-  ], { x, y });
+    { icon: 'table_view', label: 'Obtener datos de tabla o rango…', run: () => runCmd('import') },
+    '-',
+    { icon: 'add_comment', label: st.nt ? 'Editar comentario' : 'Nuevo comentario', run: editNote },
+    { icon: 'sticky_note_2', label: st.nt ? 'Editar nota' : 'Nueva nota', run: editNote },
+    ...(st.nt ? [{ icon: 'speaker_notes_off', label: 'Eliminar nota', run: () => styleSel(s => ({ ...s, nt: undefined })) }] : []),
+    '-',
+    { icon: 'tune', label: 'Formato de celdas…', hint: 'Ctrl+1', run: formatCells },
+    { icon: '', label: 'Elegir de la lista desplegable…', hint: 'Alt+↓', run: pickFromList },
+    { icon: '', label: 'Definir nombre…', disabled: true },
+    '-',
+    { icon: 'link', label: 'Vínculo', disabled: true, sub: [] },
+    { icon: '', label: 'Abrir hipervínculo', disabled: true },
+    { icon: 'add_link', label: 'Vínculo a este rango', run: linkToRange }
+  ], { x, y }, { cls: 'ctx' });
+}
+// Notas (comentarios) en celdas
+async function editNote() {
+  const cur0 = activeStyle().nt || '';
+  const v = await dialog({ title: cur0 ? 'Editar nota' : 'Nueva nota', text: `Celda ${keyOf(S.sel.ar, S.sel.ac)} · ${esc(S.me.nombre)}:`, input: cur0 });
+  focusGrid(); if (v == null) return;
+  const k = keyOf(S.sel.ar, S.sel.ac), old = cellAt(S.sel.ar, S.sel.ac);
+  write({ [`celdas/${S.sid}/${k}`]: cellObj(old?.v, { ...(old?.s || {}), nt: v.trim() ? `${S.me.nombre}: ${v.trim().replace(/^[^:]+:\s*/, '')}` : undefined }) });
+}
+// Formato de celdas (Ctrl+1)
+async function formatCells() {
+  const s = activeStyle();
+  const opt = (arr, cur) => arr.map(([v, t]) => `<option value="${v}" ${String(cur ?? '') === String(v) ? 'selected' : ''}>${t}</option>`).join('');
+  const html = `<div class="fcgrid">
+    <label>Número<select id="fcnf">${opt([['', 'General'], ['num', 'Número'], ['cur', 'Moneda (S/)'], ['usd', 'Dólares ($)'], ['pct', 'Porcentaje'], ['date', 'Fecha corta'], ['time', 'Hora'], ['text', 'Texto']], s.nf)}</select></label>
+    <label>Decimales<input id="fcd" type="number" min="0" max="10" value="${s.d ?? ''}" placeholder="auto"></label>
+    <label>Horizontal<select id="fca">${opt([['', 'General'], ['l', 'Izquierda'], ['c', 'Centro'], ['r', 'Derecha']], s.a)}</select></label>
+    <label>Vertical<select id="fcva">${opt([['', 'Inferior'], ['m', 'Centro'], ['t', 'Superior']], s.va)}</select></label>
+    <label>Tamaño de fuente<input id="fcfs" type="number" min="6" max="72" value="${s.fs || BASE_PT}"></label>
+    <label>Bordes<select id="fcbd">${opt([['keep', 'Sin cambios'], ['all', 'Todos'], ['out', 'Externos'], ['none', 'Ninguno']], 'keep')}</select></label>
+    <label class="fcchk"><input id="fcb" type="checkbox" ${s.b ? 'checked' : ''}> Negrita</label>
+    <label class="fcchk"><input id="fci" type="checkbox" ${s.i ? 'checked' : ''}> Cursiva</label>
+    <label class="fcchk"><input id="fcw" type="checkbox" ${s.w ? 'checked' : ''}> Ajustar texto</label>
+  </div>`;
+  const r = await dialog({ title: 'Formato de celdas', html, collect: d => ({
+    nf: d.querySelector('#fcnf').value, d: d.querySelector('#fcd').value, a: d.querySelector('#fca').value, va: d.querySelector('#fcva').value,
+    fs: +d.querySelector('#fcfs').value, bd: d.querySelector('#fcbd').value, b: d.querySelector('#fcb').checked, i: d.querySelector('#fci').checked, w: d.querySelector('#fcw').checked }) });
+  focusGrid(); if (!r) return;
+  styleSel(st => ({ ...st, nf: r.nf || undefined, d: r.d === '' ? undefined : Math.max(0, Math.min(10, +r.d)), a: r.a || undefined, va: r.va || undefined,
+    fs: r.fs && r.fs !== BASE_PT ? r.fs : undefined, b: r.b ? 1 : undefined, i: r.i ? 1 : undefined, w: r.w ? 1 : undefined }));
+  if (r.bd !== 'keep') borderSel(r.bd);
+}
+// Elegir de la lista desplegable (valores ya escritos en la columna)
+function pickFromList() {
+  const c = S.sel.ac, vals = new Set();
+  for (const [k, cell] of Object.entries(cellsOf(S.sid))) {
+    const p = parseKey(k); if (!p || p.c !== c || p.r === S.sel.ar || !cell.v || cell.v[0] === '=') continue;
+    vals.add(cell.v.replace(/^'/, ''));
+    if (vals.size > 300) break;
+  }
+  if (!vals.size) return toast('No hay otros valores en esta columna');
+  const k = keyOf(S.sel.ar, S.sel.ac), rect = cellRect(S.sel.ar, S.sel.ac), gr = U.gc.getBoundingClientRect();
+  menu([{ search: 'Buscar' }, ...[...vals].sort((a, b) => a.localeCompare(b, 'es')).map(v => ({ label: esc(v), run: () => setInput(S.sid, S.sel.ar, S.sel.ac, v) }))],
+    { x: gr.left + rect.x, y: gr.top + rect.y + rect.h }, { cls: 'pick' });
+  void k;
+}
+// Vínculo a este rango: copia un enlace que abre el libro en esta hoja y celda
+async function linkToRange() {
+  const url = `${location.origin}${location.pathname}#libro=${S.book}&hoja=${S.sid}&celda=${U.namebox.value}`;
+  try { await navigator.clipboard.writeText(url); toast('Vínculo copiado: al abrirlo, va directo a ' + U.namebox.value, 'ok'); }
+  catch { dialog({ title: 'Vínculo a este rango', input: url, cancel: null }); }
 }
 function fnMenu(at) {
   menu(FUNCTION_LIST.map(([n, d]) => ({ icon: 'function', label: n, hint: d, run: () => { if (S.editing) { insertAtCaret(n + '('); } else startEdit('=' + n + '(', 'edit'); } })), at);
@@ -1287,10 +1425,7 @@ function insertAtCaret(t) {
   ed.value = ed.value.slice(0, p) + t + ed.value.slice(ed.selectionEnd);
   ed.setSelectionRange(p + t.length, p + t.length); U.fx.value = ed.value; ed.focus(); placeEditor(); schedule();
 }
-async function pasteFromButton() {
-  try { const t = await navigator.clipboard.readText(); doPaste(t); }
-  catch { if (S.clip) doPaste(S.clip.text); else toast('Usa Ctrl+V para pegar'); }
-}
+const pasteFromButton = () => pasteMode('all');
 
 // ================================================================== ARCHIVO (vista Backstage)
 function backstage() {
@@ -1347,6 +1482,7 @@ const CMD = {
   undo, redo,
   save: () => toast(store?.mode === 'firebase' ? 'Todo se guarda automáticamente en la nube ☁' : 'Todo se guarda automáticamente en este navegador'),
   paste: pasteFromButton, cut: () => doCopy(true), copy: () => doCopy(false),
+  pasteMenu: at => menu([{ title: 'Opciones de pegado:', icon: 'content_paste' }, { html: pasteIconsHtml(), bind: bindPaste }, '-', { icon: '', label: 'Pegado especial…', hint: 'Ctrl+Alt+V', sub: pasteSpecialItems }], at),
   painter: () => { S.painter = { ...activeStyle() }; U.gw.classList.add('painting'); toast('Selecciona las celdas donde copiar el formato'); },
   bold: () => toggle('b'), italic: () => toggle('i'), underline: () => toggle('u'),
   font: v => styleSel(s => ({ ...s, ff: v === 'Aptos Narrow' ? undefined : v })),
@@ -1683,7 +1819,7 @@ function onKey(e, src) {
     return;
   }
   if (src === 'bar') return;
-  const nav = { ArrowUp: [-1, 0], ArrowDown: [1, 0], ArrowLeft: [0, -1], ArrowRight: [0, 1] }[k];
+  const nav = e.altKey ? null : { ArrowUp: [-1, 0], ArrowDown: [1, 0], ArrowLeft: [0, -1], ArrowRight: [0, 1] }[k];
   if (nav) { e.preventDefault(); move(nav[0], nav[1], e.shiftKey, ctrl); return; }
   if (k === 'Enter') { e.preventDefault(); move(e.shiftKey ? -1 : 1, 0); return; }
   if (k === 'Tab') { e.preventDefault(); move(0, e.shiftKey ? -1 : 1); return; }
@@ -1695,6 +1831,9 @@ function onKey(e, src) {
   if (k === 'Backspace') { e.preventDefault(); startEdit('', 'enter'); return; }
   if (k === 'Escape') { S.clip = null; S.painter = null; U.gw.classList.remove('painting'); schedule(); return; }
   if (e.altKey && (k === '=' || k === '+')) { e.preventDefault(); autoFn('SUMA'); return; }
+  if (e.altKey && k === 'ArrowDown') { e.preventDefault(); pickFromList(); return; }
+  if (ctrl && e.altKey && k.toLowerCase() === 'v') { e.preventDefault(); const r = cellRect(S.sel.ar, S.sel.ac), g = U.gc.getBoundingClientRect(); menu(pasteSpecialItems(), { x: g.left + r.x + r.w, y: g.top + r.y }); return; }
+  if (ctrl && k === '1') { e.preventDefault(); formatCells(); return; }
   if (ctrl) {
     const l = k.toLowerCase();
     const map = { z: undo, y: redo, b: CMD.bold, n: CMD.bold, i: CMD.italic, k: CMD.italic, u: CMD.underline, f: find, s: CMD.save, p: printSheet, d: () => fillDir('d'), r: () => fillDir('r'), a: () => select(0, 0, G.nr - 1, G.nc - 1, false), '`': CMD.showFormulas, ';': CMD.today, '+': () => zoom(S.z + .1), '-': () => zoom(S.z - .1) };
