@@ -7,6 +7,7 @@ import {
   formulaRefs, toEnglish, FUNCTION_LIST, FErr, compareValues, todaySerial, nowSerial, tokenize, fmtGeneral
 } from './formulas.js';
 import { buildUI, menu, closeMenu, dialog, FONTS, SIZES } from './ui.js';
+import { extractStyles } from './xlsxstyles.js';
 
 const DEF_W = 64, DEF_H = 20, HDR_H = 20, MIN_ROWS = 1000, MIN_COLS = 52;
 const BASE_PT = 11;
@@ -160,7 +161,7 @@ async function init() {
   }
   try {
     store = await createStore(S.book, {
-      onMeta: m => { S.tree.meta = m || {}; updateTitle(); },
+      onMeta: m => { S.tree.meta = m || {}; S.metaLoaded = true; updateTitle(); maybeUpgrade(); },
       onSheet: (sid, v) => {
         if (v) S.tree.hojas[sid] = v; else { delete S.tree.hojas[sid]; delete S.tree.celdas[sid]; extents.delete(sid); loaded.delete(sid); loadReq.delete(sid); }
         calc.reset(); dataDirty = true;
@@ -206,18 +207,33 @@ function ensureSheet() {
   }
   const saved = lsGet('xw-sheet:' + S.book);
   switchSheet(S.tree.hojas[saved] ? saved : list[0][0]);
+  maybeUpgrade();
 }
 
 function switchSheet(sid) {
   if (!sid) return;
   if (S.editing) commit(0, 0);
+  if (S.sid && S.sid !== sid) savePos(true);
   S.sid = sid; lsSet('xw-sheet:' + S.book, sid);
   if (!loaded.has(sid)) U.smode.textContent = 'Cargando hoja…';
   ensureLoaded(sid);
   S.extraRows = 0; geomDirty = true; dataDirty = true;
-  S.sel = { ar: 0, ac: 0, fr: 0, fc: 0 };
+  // vuelve a la celda y al desplazamiento donde lo dejaste
+  let pos = null; try { pos = JSON.parse(lsGet(`xw-pos:${S.book}:${sid}`) || 'null'); } catch { pos = null; }
+  S.sel = pos && pos.ar != null ? { ar: pos.ar, ac: pos.ac, fr: pos.fr ?? pos.ar, fc: pos.fc ?? pos.ac } : { ar: 0, ac: 0, fr: 0, fc: 0 };
+  S.extraRows = pos ? Math.max(S.sel.ar, S.sel.fr) + 200 : 0;
+  S.pendingScroll = pos ? { t: pos.t || 0, l: pos.l || 0 } : null;
   U.gw.scrollTop = 0; U.gw.scrollLeft = 0;
   renderTabs(); onSel(); schedule();
+}
+let posT = 0;
+function savePos(now) {
+  clearTimeout(posT);
+  const go = () => {
+    if (!S.sid || S.pendingScroll) return;
+    lsSet(`xw-pos:${S.book}:${S.sid}`, JSON.stringify({ ...S.sel, t: Math.round(U.gw.scrollTop / S.z), l: Math.round(U.gw.scrollLeft / S.z) }));
+  };
+  if (now) go(); else posT = setTimeout(go, 400);
 }
 
 // ================================================================== GEOMETRÍA
@@ -260,6 +276,10 @@ function render() {
   rafId = 0;
   if (!S.sid) return;
   if (geomDirty || !G) geom();
+  if (S.pendingScroll && loaded.has(S.sid)) {
+    U.gw.scrollTop = S.pendingScroll.t * S.z; U.gw.scrollLeft = S.pendingScroll.l * S.z;
+    S.pendingScroll = null; rendered = null;
+  }
   const gw = U.gw, H = gw.clientHeight, W = gw.clientWidth, st = gw.scrollTop, sl = gw.scrollLeft;
   const vr0 = rowAt(st), vr1 = rowAt(st + H - G.hh), vc0 = colAt(sl), vc1 = colAt(sl + W - G.rhw);
   if (vr1 > G.nr - 60) { S.extraRows = G.nr + 500; geom(); }
@@ -309,14 +329,16 @@ function renderCells(r0, r1, c0, c1) {
       if (s.c) st += `color:${s.c};`;
       if (d.err) st += 'color:#c00000;';
       if (s.f) st += `background:${s.f};border-color:${s.f === '#ffffff' ? '' : s.f};`;
+      const ba = s.bd === 'a', bt = s.bt || (ba ? 1 : 0), bb = s.bb || (ba || s.bd === 'b' ? 1 : 0), bl = s.bl || (ba ? 1 : 0), br = s.br || (ba ? 1 : 0);
+      if (br) st += `border-right:${br}px solid #000;`;
+      if (bb) st += `border-bottom:${bb}px solid #000;`;
+      if (bl || bt) st += `box-shadow:${[bl ? `-${bl}px 0 0 #000` : '', bt ? `0 -${bt}px 0 #000` : ''].filter(Boolean).join(',')};`;
       if (s.fs) st += `font-size:${(s.fs * 4 / 3 * z).toFixed(1)}px;`;
-      if (s.ff) st += `font-family:"${s.ff}",var(--cellfont);`;
+      if (s.ff) st += `font-family:'${String(s.ff).replace(/['"<>;]/g, '')}',var(--cellfont);`;
       st += `justify-content:${al === 'r' ? 'flex-end' : al === 'c' ? 'center' : 'flex-start'};text-align:${al === 'r' ? 'right' : al === 'c' ? 'center' : 'left'};`;
       if (s.va) st += `align-items:${s.va === 't' ? 'flex-start' : s.va === 'm' ? 'center' : 'flex-end'};`;
       let cls = 'c' + extra + cov;
       if (s.w) cls += ' wr';
-      if (s.bd === 'a') cls += ' bda';
-      if (s.bd === 'b') cls += ' bdb';
       out.push(`<div class="${cls}" style="${st}">${esc(d.t)}</div>`);
     }
   }
@@ -388,7 +410,7 @@ function onSel() {
   const R = rng();
   U.namebox.value = (R.r1 === R.r2 && R.c1 === R.c2) ? keyOf(S.sel.ar, S.sel.ac) : `${keyOf(R.r1, R.c1)}:${keyOf(R.r2, R.c2)}`;
   if (!S.editing) U.fx.value = cellAt(S.sel.ar, S.sel.ac)?.v ?? '';
-  refreshRibbon(); updateStats(); schedule();
+  refreshRibbon(); updateStats(); schedule(); savePos();
   clearTimeout(presT);
   presT = setTimeout(() => store && store.presence({ nombre: S.me.nombre, color: S.me.color, hoja: S.sid, ar: S.sel.ar, ac: S.sel.ac }), 400);
 }
@@ -558,6 +580,25 @@ function styleSel(fn) {
   write(upd);
 }
 const activeStyle = () => cellAt(S.sel.ar, S.sel.ac)?.s || {};
+// Bordes estilo Excel: por lado, todos, externos o grueso de cuadro
+function borderSel(kind) {
+  const R = boundedSel(), cells = cellsOf(S.sid), upd = {};
+  for (let r = R.r1; r <= R.r2; r++) for (let c = R.c1; c <= R.c2; c++) {
+    const k = keyOf(r, c), old = cells[k], s = { ...(old?.s || {}) };
+    if (s.bd === 'a') { s.bt = s.bb = s.bl = s.br = 1; }
+    else if (s.bd === 'b') s.bb = 1;
+    delete s.bd;
+    const top = r === R.r1, bot = r === R.r2, lef = c === R.c1, rig = c === R.c2;
+    if (kind === 'none') { delete s.bt; delete s.bb; delete s.bl; delete s.br; }
+    else if (kind === 'all') { s.bt = s.bb = s.bl = s.br = 1; }
+    else if (kind === 'out' || kind === 'thick') { const w = kind === 'thick' ? 2 : 1; if (top) s.bt = w; if (bot) s.bb = w; if (lef) s.bl = w; if (rig) s.br = w; }
+    else if (kind === 'b' && bot) s.bb = 1; else if (kind === 't' && top) s.bt = 1;
+    else if (kind === 'l' && lef) s.bl = 1; else if (kind === 'r' && rig) s.br = 1;
+    if (s.bt === 1 && s.bb === 1 && s.bl === 1 && s.br === 1) { delete s.bt; delete s.bb; delete s.bl; delete s.br; s.bd = 'a'; }
+    upd[`celdas/${S.sid}/${k}`] = cellObj(old?.v, s);
+  }
+  write(upd);
+}
 function clearSel(what) {
   const R = boundedSel(), cells = cellsOf(S.sid), upd = {};
   for (let r = R.r1; r <= R.r2; r++) for (let c = R.c1; c <= R.c2; c++) {
@@ -884,42 +925,95 @@ async function seedBook(lb) {
     const r = await fetch(encodeURI(lb.archivo));
     if (!r.ok) throw new Error('No se encontró el archivo ' + lb.archivo);
     await importBuffer(await r.arrayBuffer(), true, (i, n) => { const m = document.getElementById('loadmsg'); if (m) m.textContent = `Guardando hoja ${i} de ${n} en la nube…`; });
-    await write({ 'meta/nombre': lb.nombre, 'meta/importado': new Date().toISOString() }, false);
+    await write({ 'meta/nombre': lb.nombre, 'meta/importado': new Date().toISOString(), 'meta/estilos': STYLE_VERSION }, false);
   } catch (e) {
     toast('No se pudo cargar el libro: ' + e.message, 'err', 10000);
     write({ 'hojas/h1': { nombre: 'Hoja1', orden: 0 } }, false); switchSheet('h1');
   } finally { box.remove(); }
 }
+// Convierte una hoja del .xlsx en celdas {v, s} con su formato original (bordes, letra, relleno…)
+function sheetCells(X, ws, fmt) {
+  const cells = {};
+  let mr = -1, mc = -1;
+  for (const addr of Object.keys(ws)) {
+    if (addr[0] === '!') continue;
+    const x = ws[addr];
+    if (x.v == null && !x.f) continue;
+    const p = X.utils.decode_cell(addr);
+    if (p.r <= 20000 && p.c <= 200) { if (p.r > mr) mr = p.r; if (p.c > mc) mc = p.c; }
+  }
+  const keys = new Set(Object.keys(ws).filter(a => a[0] !== '!'));
+  for (const a of Object.keys(fmt || {})) keys.add(a);
+  for (const addr of keys) {
+    const x = ws[addr] || {}, p = X.utils.decode_cell(addr);
+    if (p.r > 20000 || p.c > 200) continue;
+    let v = null; const s = { ...((fmt || {})[addr] || {}) };
+    if (x.f) v = '=' + x.f;
+    else if (x.t === 'n') v = String(x.v);
+    else if (x.t === 'b') v = x.v ? 'VERDADERO' : 'FALSO';
+    else if (x.t === 'e') v = x.w || '#N/A';
+    else if (x.t === 's' || x.t === 'str') v = x.v == null ? '' : String(x.v);
+    else if (x.t === 'd') v = String(x.v);
+    if (x.t === 'n' || (x.f && typeof x.v === 'number')) Object.assign(s, nfFromZ(x.z, X));
+    if (x.t === 's' && /^\d/.test(v) && !isNaN(+v)) v = "'" + v;
+    if (!s.f) { const fg = x.s && x.s.patternType === 'solid' && x.s.fgColor && x.s.fgColor.rgb; if (fg && fg !== 'FFFFFF' && /^[0-9A-F]{6,8}$/i.test(fg)) s.f = '#' + fg.slice(-6).toLowerCase(); }
+    if (typeof v === 'string' && v.includes('\n')) s.w = 1;
+    // celdas vacías solo con formato: se guardan si están cerca de los datos (evita miles de celdas inútiles)
+    if ((v == null || v === '') && (p.r > mr + 3 || p.c > mc + 2 || !(s.f || s.bd || s.bt || s.bb || s.bl || s.br))) continue;
+    const o = cellObj(v, s); if (o) cells[keyOf(p.r, p.c)] = o;
+  }
+  const anchos = {}, altos = {};
+  (ws['!cols'] || []).forEach((c, i) => { if (c && !c.hidden) { const px = c.wpx || (c.wch ? Math.round(c.wch * 7 + 5) : 0); if (px && Math.abs(px - DEF_W) > 2) anchos['c' + i] = Math.round(px); } });
+  (ws['!rows'] || []).forEach((r, i) => { if (r && i <= mr + 3) { const px = r.hpt ? Math.round(r.hpt * 4 / 3) : (r.hpx || 0); if (px >= 12 && Math.abs(px - DEF_H) > 1) altos['r' + i] = px; } });
+  return { cells, anchos, altos };
+}
+const STYLE_VERSION = 2;
+function readWorkbook(X, buf) {
+  const wb = X.read(buf, { type: 'array', cellFormula: true, cellNF: true, cellStyles: true, cellDates: false, bookFiles: true });
+  let fmt = {};
+  try { fmt = extractStyles(wb); } catch (e) { console.warn('Sin formato original', e); }
+  return { wb, fmt };
+}
+// Libros ya cargados antes de leer el formato: aplica bordes, letras y rellenos del Excel original una sola vez
+let upgrading = false;
+async function upgradeStyles(lb) {
+  if (upgrading) return; upgrading = true;
+  try {
+    const X = await loadXLSX();
+    const r = await fetch(encodeURI(lb.archivo)); if (!r.ok) return;
+    const { wb, fmt } = readWorkbook(X, await r.arrayBuffer());
+    U.sinfo.textContent = 'Aplicando el formato del Excel original…';
+    let idx = 0;
+    for (const name of wb.SheetNames) {
+      idx++;
+      const sid = 's' + String(idx).padStart(3, '0');
+      if (!S.tree.hojas[sid] || !wb.Sheets[name]) continue;
+      const { cells, anchos, altos } = sheetCells(X, wb.Sheets[name], fmt[name]);
+      const upd = {};
+      for (const [k, o] of Object.entries(cells)) if (o.s) upd[`celdas/${sid}/${k}/s`] = o.s;
+      upd[`hojas/${sid}/anchos`] = Object.keys(anchos).length ? anchos : null;
+      upd[`hojas/${sid}/altos`] = Object.keys(altos).length ? altos : null;
+      await write(upd, false);
+    }
+    await write({ 'meta/estilos': STYLE_VERSION }, false);
+    U.sinfo.textContent = '';
+    toast('Se aplicaron los bordes y el formato del Excel original', 'ok');
+  } catch (e) { console.warn(e); } finally { upgrading = false; }
+}
+function maybeUpgrade() {
+  const lb = libroById(S.book);
+  if (!lb || !S.ready || !S.metaLoaded || !sortedSheets().length) return;
+  if ((S.tree.meta.estilos || 0) < STYLE_VERSION && S.tree.meta.importado) upgradeStyles(lb);
+}
 async function importBuffer(buf, seed, progress) {
   let X;
   try { X = await loadXLSX(); } catch (e) { return toast(e.message, 'err'); }
-  const wb = X.read(buf, { type: 'array', cellFormula: true, cellNF: true, cellStyles: true, cellDates: false });
+  const { wb, fmt } = readWorkbook(X, buf);
   let first = null, order = seed ? 0 : nextOrder(), total = 0, idx = 0;
   for (const name of wb.SheetNames) {
     idx++; if (progress) progress(idx, wb.SheetNames.length);
     const ws = wb.Sheets[name]; if (!ws) continue;
-    const cells = {};
-    for (const addr of Object.keys(ws)) {
-      if (addr[0] === '!') continue;
-      const x = ws[addr], p = X.utils.decode_cell(addr);
-      if (p.r > 20000 || p.c > 200) continue;
-      let v = null; const s = {};
-      if (x.f) v = '=' + x.f;
-      else if (x.t === 'n') v = String(x.v);
-      else if (x.t === 'b') v = x.v ? 'VERDADERO' : 'FALSO';
-      else if (x.t === 'e') v = x.w || '#N/A';
-      else if (x.t === 's' || x.t === 'str') v = x.v == null ? '' : String(x.v);
-      else if (x.t === 'd') v = String(x.v);
-      if (x.t === 'n' || (x.f && typeof x.v === 'number')) Object.assign(s, nfFromZ(x.z, X));
-      if (x.t === 's' && /^\d/.test(v) && !isNaN(+v)) v = "'" + v;
-      const fg = x.s && x.s.patternType === 'solid' && x.s.fgColor && x.s.fgColor.rgb;
-      if (fg && fg !== 'FFFFFF' && /^[0-9A-F]{6,8}$/i.test(fg)) s.f = '#' + fg.slice(-6).toLowerCase();
-      if (typeof v === 'string' && v.includes('\n')) s.w = 1;
-      const o = cellObj(v, s); if (o) cells[keyOf(p.r, p.c)] = o;
-    }
-    const anchos = {}, altos = {};
-    (ws['!cols'] || []).forEach((c, i) => { if (c && !c.hidden) { const px = c.wpx || (c.wch ? Math.round(c.wch * 7 + 5) : 0); if (px && Math.abs(px - DEF_W) > 2) anchos['c' + i] = Math.round(px); } });
-    (ws['!rows'] || []).forEach((r, i) => { if (r) { const px = r.hpx || (r.hpt ? Math.round(r.hpt * 4 / 3) : 0); if (px && px > DEF_H + 1 && i < 20000) altos['r' + i] = Math.round(px); } });
+    const { cells, anchos, altos } = sheetCells(X, ws, fmt[name]);
     const sid = seed ? 's' + String(idx).padStart(3, '0') : newSid();
     const meta = { nombre: seed ? name : uniqueName(name), orden: order++ };
     if (Object.keys(anchos).length) meta.anchos = anchos;
@@ -1131,9 +1225,15 @@ const CMD = {
   grow: () => { const c = activeStyle().fs || BASE_PT; const n = SIZES.find(x => x > c) || c; styleSel(s => ({ ...s, fs: n })); },
   shrink: () => { const c = activeStyle().fs || BASE_PT; const n = [...SIZES].reverse().find(x => x < c) || c; styleSel(s => ({ ...s, fs: n })); },
   bordersMenu: at => menu([
-    { icon: 'border_all', label: 'Todos los bordes', run: () => styleSel(s => ({ ...s, bd: 'a' })) },
-    { icon: 'border_bottom', label: 'Borde inferior', run: () => styleSel(s => ({ ...s, bd: 'b' })) },
-    { icon: 'border_clear', label: 'Sin borde', run: () => styleSel(s => ({ ...s, bd: undefined })) }], at),
+    { icon: 'border_bottom', label: 'Borde inferior', run: () => borderSel('b') },
+    { icon: 'border_top', label: 'Borde superior', run: () => borderSel('t') },
+    { icon: 'border_left', label: 'Borde izquierdo', run: () => borderSel('l') },
+    { icon: 'border_right', label: 'Borde derecho', run: () => borderSel('r') },
+    '-',
+    { icon: 'border_all', label: 'Todos los bordes', run: () => borderSel('all') },
+    { icon: 'border_outer', label: 'Bordes externos', run: () => borderSel('out') },
+    { icon: 'check_box_outline_blank', label: 'Borde de cuadro grueso', run: () => borderSel('thick') },
+    { icon: 'border_clear', label: 'Sin borde', run: () => borderSel('none') }], at),
   fill: () => applyColor('fill', S.fillColor), fillMenu: at => colorMenu(at, 'fill'),
   color: () => applyColor('color', S.fontColor), colorMenu: at => colorMenu(at, 'color'),
   vtop: () => setA('va', 't'), vmid: () => setA('va', 'm'), vbot: () => setA('va', 'b'),
@@ -1278,7 +1378,8 @@ function bindUI() {
   file.addEventListener('change', () => { const f = file.files[0]; file.value = ''; if (f) importFile(f).catch(e => toast('No se pudo importar: ' + e.message, 'err')); });
 
   // ---- scroll / tamaño
-  gw.addEventListener('scroll', schedule, { passive: true });
+  gw.addEventListener('scroll', () => { schedule(); savePos(); }, { passive: true });
+  window.addEventListener('pagehide', () => savePos(true));
   new ResizeObserver(schedule).observe(gw);
   gw.addEventListener('wheel', e => { if (e.ctrlKey) { e.preventDefault(); zoom(S.z * (e.deltaY < 0 ? 1.1 : 0.9)); } }, { passive: false });
   zr.addEventListener('input', () => zoom(zr.value / 100));
@@ -1530,7 +1631,12 @@ function setupFavicon() {
   img.src = 'img/hotel.jpg';
 }
 function setupPWA() {
-  if ('serviceWorker' in navigator && location.protocol !== 'file:') navigator.serviceWorker.register('sw.js').catch(() => {});
+  if ('serviceWorker' in navigator && location.protocol !== 'file:') {
+    // Cuando se publica una versión nueva, la página se recarga sola una vez para usarla
+    const had = !!navigator.serviceWorker.controller; let done = false;
+    navigator.serviceWorker.addEventListener('controllerchange', () => { if (had && !done && !S.editing) { done = true; location.reload(); } });
+    navigator.serviceWorker.register('sw.js').then(r => r.update()).catch(() => {});
+  }
   window.addEventListener('beforeinstallprompt', e => { e.preventDefault(); deferredInstall = e; U.installBtn.hidden = false; });
   window.addEventListener('appinstalled', () => { U.installBtn.hidden = true; toast('App instalada en tu computadora', 'ok'); });
 }

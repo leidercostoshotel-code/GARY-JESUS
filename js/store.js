@@ -69,11 +69,11 @@ function localStore(book, h) {
   try { tree = JSON.parse(localStorage.getItem(KEY) || '{}'); } catch { tree = {}; }
   const bc = 'BroadcastChannel' in window ? new BroadcastChannel(KEY) : null;
   const peers = {};
-  let myPres = null;
+  let myPres = null, warned = false;
 
   const persist = () => {
     try { localStorage.setItem(KEY, JSON.stringify(tree)); }
-    catch { h.onError('El navegador no tiene más espacio. Configura Firebase para guardar libros grandes.'); }
+    catch { if (!warned) { warned = true; h.onError('El navegador no tiene más espacio. Configura Firebase para guardar libros grandes.'); } }
   };
   const apply = (updates, save) => {
     const oldTree = { hojas: { ...tree.hojas }, celdas: { ...tree.celdas }, meta: tree.meta };
