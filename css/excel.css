@@ -113,10 +113,7 @@ button, select, input { font: inherit; color: inherit; }
 .c.ov { overflow: visible; z-index: 1; }
 .c.cov { border-right-color: transparent; }
 .c.wr { white-space: pre-wrap; word-break: break-word; }
-.c.bda { border-right: 1px solid #000; border-bottom: 1px solid #000; box-shadow: -1px 0 0 #000, 0 -1px 0 #000; }
-.c.bdb { border-bottom: 1px solid #000; }
-.gw.nogrid .c:not(.bda) { border-right-color: transparent; }
-.gw.nogrid .c:not(.bda):not(.bdb) { border-bottom-color: transparent; }
+.gw.nogrid .c { border-right-color: transparent; border-bottom-color: transparent; }
 .gw.painting .gc { cursor: copy; }
 .ovl { position: absolute; left: 0; top: 0; z-index: 2; pointer-events: none; }
 .selbox { position: absolute; border: 2px solid var(--sel); }
