@@ -25,22 +25,90 @@ const S = {
   sid: null,
   sel: { ar: 0, ac: 0, fr: 0, fc: 0 },
   z: 1, editing: null, undo: [], redo: [], others: {}, clip: null,
-  showF: false, grid: lsGet('xw-grid') !== '0', bg: lsGet('xw-bg') !== '0',
+  showF: false, grid: lsGet('xw-grid') !== '0',
   fillColor: '#ffff00', fontColor: '#c00000', painter: null, extraRows: 0, ready: false
 };
 let store = null, U = null, G = null, geomDirty = true, dataDirty = true, rendered = null, rafId = 0;
 const extents = new Map();
 
+// Carga perezosa de hojas: cada usuario descarga solo lo que ve
+const loaded = new Set(), loadReq = new Map();
+function ensureLoaded(sid) {
+  if (!sid || !store) return Promise.resolve();
+  let p = loadReq.get(sid);
+  if (!p) {
+    let res; p = new Promise(r => { res = r; }); p.res = res;
+    loadReq.set(sid, p);
+    store.watch(sid);
+  }
+  return p;
+}
+function onLoaded(sid) {
+  loaded.add(sid);
+  const p = loadReq.get(sid); if (p && p.res) p.res();
+  calc.reset(); dataDirty = true; extents.delete(sid);
+  if (sid === S.sid) { geomDirty = true; if (!S.editing) { U.smode.textContent = 'Listo'; scheduleFormulaBar(); } }
+  schedule();
+}
+async function loadAll(why) {
+  const pend = sortedSheets().map(([sid]) => sid).filter(sid => !loaded.has(sid));
+  if (!pend.length) return;
+  if (why) toast(why);
+  await Promise.all(pend.map(ensureLoaded));
+}
+
 function getBook() {
   const h = new URLSearchParams(location.hash.slice(1)).get('libro');
-  const b = (h || lsGet('xw-book') || 'principal').replace(/[^\w-]/g, '').slice(0, 40) || 'principal';
-  lsSet('xw-book', b);
-  return b;
+  return h ? h.replace(/[^\w-]/g, '').slice(0, 40) || null : null;
+}
+
+// Libros del repositorio: se cargan solos en Firebase la primera vez que alguien los abre
+const LIBROS = [
+  { id: 'pedido-bodegas-2024', nombre: 'PEDIDO BODEGAS 2024', archivo: 'PEDIDO BODEGAS 2024.xlsx', icon: 'inventory_2', desc: 'Pedidos semanales de bodega, vencimientos, centros de costo' },
+  { id: 'pedido-cocina-2024', nombre: 'PEDIDO DE COCINA 2024', archivo: 'PEDIDO DE COCINA 2024 - copia.xlsx', icon: 'restaurant', desc: 'Pedidos diarios de cocina por proveedor' }
+];
+const libroById = id => LIBROS.find(l => l.id === id);
+
+// Pantalla inicial: elegir a qué libro ingresar
+function launcher() {
+  return new Promise(resolve => {
+    const d = document.createElement('div');
+    d.className = 'modal hero launcher';
+    const last = lsGet('xw-book');
+    d.innerHTML = `<div class="mbox lbox">
+      <div class="mhero"><img src="icons/icon-192.png" alt=""><div><b>Excel del Hotel</b><span>Hojas de cálculo compartidas en tiempo real</span></div></div>
+      <label class="lname">Tu nombre<input class="min" id="lnombre" placeholder="Escribe tu nombre" value="${esc(lsGet('xw-nombre') || '')}"></label>
+      <h3>¿A qué libro deseas ingresar?</h3>
+      <div class="lcards">${LIBROS.map(l => `<button class="lcard${l.id === last ? ' last' : ''}" data-id="${l.id}">
+        <span class="ms">${l.icon}</span><span class="lt"><b>${esc(l.nombre)}</b><small>${esc(l.desc)}</small></span>
+        ${l.id === last ? '<em>Último abierto</em>' : ''}<span class="ms go">chevron_right</span></button>`).join('')}</div>
+      <button class="lother">Abrir otro libro o crear uno nuevo…</button>
+    </div>`;
+    document.body.appendChild(d);
+    const nameIn = d.querySelector('#lnombre');
+    const done = id => {
+      let n = nameIn.value.trim();
+      if (!n) { nameIn.focus(); nameIn.classList.add('bad'); toast('Escribe tu nombre para continuar', 'warn'); return; }
+      lsSet('xw-nombre', n); d.remove(); resolve(id);
+    };
+    d.querySelectorAll('.lcard').forEach(b => b.onclick = () => done(b.dataset.id));
+    d.querySelector('.lother').onclick = async () => {
+      if (!nameIn.value.trim()) return done(null);
+      const v = (await dialog({ title: 'Abrir otro libro', text: 'Escribe el código de un libro existente, o un nombre nuevo para crear un libro en blanco:', input: '' }))?.trim();
+      if (!v) return;
+      const id = v.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[^\w]+/g, '-').replace(/^-|-$/g, '').slice(0, 40);
+      if (!id) return;
+      lsSet('xw-newname:' + id, v);
+      done(id);
+    };
+    nameIn.addEventListener('keydown', e => { if (e.key === 'Enter') { const l = d.querySelector('.lcard.last') || d.querySelector('.lcard'); l.focus(); } });
+    setTimeout(() => (nameIn.value ? d.querySelector('.lcard.last, .lcard') : nameIn).focus(), 50);
+  });
 }
 
 // ------------------------------------------------------------------ modelo para la calculadora
 const model = {
-  raw: (sid, r, c) => { const m = S.tree.celdas[sid]; if (!m) return undefined; const x = m[keyOf(r, c)]; return x ? x.v : undefined; },
+  raw: (sid, r, c) => { if (!loadReq.has(sid)) ensureLoaded(sid); const m = S.tree.celdas[sid]; if (!m) return undefined; const x = m[keyOf(r, c)]; return x ? x.v : undefined; },
   sheetIdByName(name) {
     const n = name.toLowerCase();
     for (const [id, h] of Object.entries(S.tree.hojas)) if ((h.nombre || '').toLowerCase() === n) return id;
@@ -69,7 +137,6 @@ const rng = () => { const s = S.sel; return { r1: Math.min(s.ar, s.fr), r2: Math
 init();
 async function init() {
   U = buildUI(document.getElementById('app'));
-  applyBg();
   setupFavicon();
   setupPWA();
   bindUI();
@@ -77,12 +144,15 @@ async function init() {
   U.colorBar.style.background = S.fontColor;
   if (!S.grid) U.gw.classList.add('nogrid');
 
-  let nombre = lsGet('xw-nombre');
-  if (!nombre) {
-    nombre = (await dialog({ hero: true, title: '¡Bienvenido!', text: 'Escribe tu nombre para que tus compañeros vean quién está editando.', input: '', cancel: null, ok: 'Entrar' }) || '').trim();
-    if (!nombre) nombre = 'Usuario ' + Math.floor(Math.random() * 900 + 100);
-    lsSet('xw-nombre', nombre);
+  if (!S.book) {
+    S.book = await launcher();
+    history.replaceState(null, '', '#libro=' + S.book);
   }
+  lsSet('xw-book', S.book);
+  window.addEventListener('hashchange', () => location.reload());
+  const nombre = lsGet('xw-nombre') || 'Usuario ' + Math.floor(Math.random() * 900 + 100);
+  const lb = libroById(S.book);
+  if (lb) { U.bookName.textContent = lb.nombre; document.title = lb.nombre + ' - Excel'; }
   S.me = { nombre, color: PALETTE[Math.abs(hash(nombre + Math.random())) % PALETTE.length] };
 
   if (!usingFirebase()) {
@@ -92,7 +162,7 @@ async function init() {
     store = await createStore(S.book, {
       onMeta: m => { S.tree.meta = m || {}; updateTitle(); },
       onSheet: (sid, v) => {
-        if (v) S.tree.hojas[sid] = v; else { delete S.tree.hojas[sid]; delete S.tree.celdas[sid]; extents.delete(sid); }
+        if (v) S.tree.hojas[sid] = v; else { delete S.tree.hojas[sid]; delete S.tree.celdas[sid]; extents.delete(sid); loaded.delete(sid); loadReq.delete(sid); }
         calc.reset(); dataDirty = true;
         if (sid === S.sid) { geomDirty = true; if (!v && S.ready) switchSheet(sortedSheets()[0]?.[0]); }
         scheduleTabs(); schedule();
@@ -112,6 +182,7 @@ async function init() {
         renderUsers(); schedule(); setTimeout(schedule, 3200);
       },
       onReady: () => { S.ready = true; ensureSheet(); },
+      onLoaded,
       onStatus: setCloud,
       onError: msg => toast(msg, 'err', 10000)
     });
@@ -126,6 +197,8 @@ async function init() {
 
 function ensureSheet() {
   const list = sortedSheets();
+  const lb = libroById(S.book);
+  if (!list.length && lb) { seedBook(lb); return; }
   if (!list.length) {
     store.write({ 'hojas/h1': { nombre: 'Hoja1', orden: 0 }, 'meta/nombre': S.tree.meta.nombre || 'Libro1' });
     switchSheet('h1');
@@ -139,6 +212,8 @@ function switchSheet(sid) {
   if (!sid) return;
   if (S.editing) commit(0, 0);
   S.sid = sid; lsSet('xw-sheet:' + S.book, sid);
+  if (!loaded.has(sid)) U.smode.textContent = 'Cargando hoja…';
+  ensureLoaded(sid);
   S.extraRows = 0; geomDirty = true; dataDirty = true;
   S.sel = { ar: 0, ac: 0, fr: 0, fc: 0 };
   U.gw.scrollTop = 0; U.gw.scrollLeft = 0;
@@ -315,7 +390,7 @@ function onSel() {
   if (!S.editing) U.fx.value = cellAt(S.sel.ar, S.sel.ac)?.v ?? '';
   refreshRibbon(); updateStats(); schedule();
   clearTimeout(presT);
-  presT = setTimeout(() => store && store.presence({ nombre: S.me.nombre, color: S.me.color, hoja: S.sid, ar: S.sel.ar, ac: S.sel.ac }), 120);
+  presT = setTimeout(() => store && store.presence({ nombre: S.me.nombre, color: S.me.color, hoja: S.sid, ar: S.sel.ar, ac: S.sel.ac }), 400);
 }
 let fbT = 0;
 function scheduleFormulaBar() { clearTimeout(fbT); fbT = setTimeout(() => { if (!S.editing) { U.fx.value = cellAt(S.sel.ar, S.sel.ac)?.v ?? ''; updateStats(); } }, 50); }
@@ -714,6 +789,7 @@ async function renameSheet(sid) {
   if (!v || v === old) return focusGrid();
   if (/[\\/?*[\]:]/.test(v)) { toast('El nombre no puede contener \\ / ? * [ ] :', 'err'); return focusGrid(); }
   if (model.sheetIdByName(v) && model.sheetIdByName(v) !== sid) { toast('Ya existe una hoja con ese nombre', 'err'); return focusGrid(); }
+  await loadAll('Actualizando las fórmulas que usan esta hoja…');
   const upd = { [`hojas/${sid}/nombre`]: v };
   for (const [s2, m] of Object.entries(S.tree.celdas)) for (const [k, cell] of Object.entries(m)) {
     if (!cell.v || cell.v[0] !== '=') continue;
@@ -795,12 +871,32 @@ function nfFromZ(z, X) {
 }
 async function importFile(file) {
   toast('Leyendo ' + file.name + '…');
+  return importBuffer(await file.arrayBuffer(), false);
+}
+// Primera apertura de un libro del repositorio: carga su .xlsx en Firebase.
+// Usa identificadores fijos (s000, s001…) para que, si dos personas lo abren a la vez, no se dupliquen las hojas.
+async function seedBook(lb) {
+  const box = document.createElement('div');
+  box.className = 'loading';
+  box.innerHTML = `<div class="lbox2"><span class="spin"></span><b>Preparando ${esc(lb.nombre)}</b><span id="loadmsg">Descargando el archivo…</span></div>`;
+  document.body.appendChild(box);
+  try {
+    const r = await fetch(encodeURI(lb.archivo));
+    if (!r.ok) throw new Error('No se encontró el archivo ' + lb.archivo);
+    await importBuffer(await r.arrayBuffer(), true, (i, n) => { const m = document.getElementById('loadmsg'); if (m) m.textContent = `Guardando hoja ${i} de ${n} en la nube…`; });
+    await write({ 'meta/nombre': lb.nombre, 'meta/importado': new Date().toISOString() }, false);
+  } catch (e) {
+    toast('No se pudo cargar el libro: ' + e.message, 'err', 10000);
+    write({ 'hojas/h1': { nombre: 'Hoja1', orden: 0 } }, false); switchSheet('h1');
+  } finally { box.remove(); }
+}
+async function importBuffer(buf, seed, progress) {
   let X;
   try { X = await loadXLSX(); } catch (e) { return toast(e.message, 'err'); }
-  const buf = await file.arrayBuffer();
   const wb = X.read(buf, { type: 'array', cellFormula: true, cellNF: true, cellStyles: true, cellDates: false });
-  let first = null, order = nextOrder(), total = 0;
+  let first = null, order = seed ? 0 : nextOrder(), total = 0, idx = 0;
   for (const name of wb.SheetNames) {
+    idx++; if (progress) progress(idx, wb.SheetNames.length);
     const ws = wb.Sheets[name]; if (!ws) continue;
     const cells = {};
     for (const addr of Object.keys(ws)) {
@@ -824,21 +920,22 @@ async function importFile(file) {
     const anchos = {}, altos = {};
     (ws['!cols'] || []).forEach((c, i) => { if (c && !c.hidden) { const px = c.wpx || (c.wch ? Math.round(c.wch * 7 + 5) : 0); if (px && Math.abs(px - DEF_W) > 2) anchos['c' + i] = Math.round(px); } });
     (ws['!rows'] || []).forEach((r, i) => { if (r) { const px = r.hpx || (r.hpt ? Math.round(r.hpt * 4 / 3) : 0); if (px && px > DEF_H + 1 && i < 20000) altos['r' + i] = Math.round(px); } });
-    const sid = newSid();
-    const meta = { nombre: uniqueName(name), orden: order++ };
+    const sid = seed ? 's' + String(idx).padStart(3, '0') : newSid();
+    const meta = { nombre: seed ? name : uniqueName(name), orden: order++ };
     if (Object.keys(anchos).length) meta.anchos = anchos;
     if (Object.keys(altos).length) meta.altos = altos;
     S.tree.hojas[sid] = meta; // reserva el nombre para la siguiente hoja
     await write({ ['hojas/' + sid]: meta, ['celdas/' + sid]: Object.keys(cells).length ? cells : null }, false);
     total += Object.keys(cells).length;
-    if (!first) first = sid;
+    if (!first) { first = sid; if (seed) switchSheet(sid); }
   }
-  if (first) switchSheet(first);
-  toast(`Importado: ${wb.SheetNames.length} hojas, ${total.toLocaleString('es-PE')} celdas. Ya está guardado y compartido.`, 'ok', 6000);
+  if (first && !seed) switchSheet(first);
+  toast(`${seed ? 'Libro listo' : 'Importado'}: ${wb.SheetNames.length} hojas, ${total.toLocaleString('es-PE')} celdas. Ya está guardado y compartido.`, 'ok', 6000);
 }
 const XLSX_FMT = { num: d => '#,##0' + (d ? '.' + '0'.repeat(d) : ''), cur: d => '"S/" #,##0' + (d ? '.' + '0'.repeat(d) : ''), usd: d => '"$" #,##0' + (d ? '.' + '0'.repeat(d) : ''), pct: d => '0' + (d ? '.' + '0'.repeat(d) : '') + '%', date: () => 'dd/mm/yyyy', time: () => 'hh:mm' };
 async function exportXlsx() {
   let X; try { X = await loadXLSX(); } catch (e) { return toast(e.message, 'err'); }
+  await loadAll('Descargando todas las hojas para el archivo…');
   const wb = X.utils.book_new(), used = new Set();
   for (const [sid, h] of sortedSheets()) {
     const ws = {}, cells = cellsOf(sid); let mr = 0, mc = 0;
@@ -979,7 +1076,7 @@ function backstage() {
   const users = Object.values(S.others);
   d.innerHTML = `<aside><button class="bk-back">${'<span class="ms">arrow_back</span>'}</button>
     <button data-a="new"><span class="ms">note_add</span>Nuevo libro</button>
-    <button data-a="open"><span class="ms">folder_open</span>Abrir libro</button>
+    <button data-a="open"><span class="ms">apps</span>Elegir otro libro</button>
     <button data-a="import"><span class="ms">upload_file</span>Importar Excel</button>
     <button data-a="xlsx"><span class="ms">download</span>Descargar .xlsx</button>
     <button data-a="csv"><span class="ms">csv</span>Descargar CSV</button>
@@ -994,7 +1091,7 @@ function backstage() {
       <p>Tu nombre: <b>${esc(S.me.nombre)}</b></p></div>
       <div class="bk-card"><h3>Personas conectadas (${users.length + 1})</h3>
       <ul class="bk-users"><li><i style="background:${S.me.color}"></i>${esc(S.me.nombre)} (tú)</li>${users.map(u => `<li><i style="background:${u.color}"></i>${esc(u.nombre)} — ${esc(S.tree.hojas[u.hoja]?.nombre || '')} ${u.ar != null ? keyOf(u.ar, u.ac) : ''}</li>`).join('')}</ul></div>
-      <div class="bk-card"><h3>Archivos del repositorio</h3><p>Puedes importar <b>PEDIDO BODEGAS 2024.xlsx</b> y <b>PEDIDO DE COCINA 2024.xlsx</b> con "Importar Excel": todas sus hojas quedan en la nube para todos.</p></div>
+      <div class="bk-card"><h3>Libros del hotel</h3><p><b>PEDIDO BODEGAS 2024</b> y <b>PEDIDO DE COCINA 2024</b> se cargan solos en la nube la primera vez que alguien los abre. Usa "Elegir otro libro" para cambiar entre ellos.</p></div>
     </main>`;
   document.body.appendChild(d);
   const onEsc = e => { if (e.key === 'Escape') close(); };
@@ -1078,7 +1175,6 @@ const CMD = {
   import: () => U.file.click(), exportXlsx, exportCsv, print: printSheet,
   zoomIn: () => zoom(S.z + 0.1), zoomOut: () => zoom(S.z - 0.1), zoom100: () => zoom(1),
   grid: () => { S.grid = !S.grid; lsSet('xw-grid', S.grid ? '1' : '0'); U.gw.classList.toggle('nogrid', !S.grid); refreshRibbon(); },
-  bgToggle: () => { S.bg = !S.bg; lsSet('xw-bg', S.bg ? '1' : '0'); applyBg(); refreshRibbon(); },
   fullscreen: () => { if (document.fullscreenElement) document.exitFullscreen(); else document.documentElement.requestFullscreen?.(); },
   install: async () => {
     if (deferredInstall) { deferredInstall.prompt(); const r = await deferredInstall.userChoice; if (r.outcome === 'accepted') toast('¡Instalada! Búscala en el escritorio o el menú Inicio.', 'ok'); deferredInstall = null; U.installBtn.hidden = true; }
@@ -1095,11 +1191,8 @@ const CMD = {
     const id = n.toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/[^\w]+/g, '-').replace(/^-|-$/g, '').slice(0, 30) + '-' + Math.random().toString(36).slice(2, 6);
     lsSet('xw-book', id); location.hash = 'libro=' + id; lsSet('xw-newname:' + id, n); location.reload();
   },
-  openBook: async () => {
-    const id = (await dialog({ title: 'Abrir libro', text: 'Código del libro (aparece en Archivo → Información o en el enlace compartido):', input: S.book }))?.trim();
-    if (!id) return focusGrid();
-    lsSet('xw-book', id); location.hash = 'libro=' + id; location.reload();
-  },
+  openBook: () => { location.hash = ''; },
+  home: () => { location.hash = ''; },
   myName: async () => {
     const n = (await dialog({ title: 'Tu nombre', input: S.me.nombre }))?.trim(); if (!n) return focusGrid();
     S.me.nombre = n; lsSet('xw-nombre', n); onSel(); renderUsers(); focusGrid();
@@ -1112,6 +1205,7 @@ const range = (a, b) => Array.from({ length: b - a + 1 }, (_, i) => a + i);
 function runCmd(name, arg, el) {
   const f = CMD[name]; if (!f) return;
   const keepsEdit = ['fnMenu', 'cancelEdit', 'commitEdit'].includes(name);
+  if (name === 'home' || name === 'openBook') { if (S.editing) commit(0, 0); return f(); }
   if (S.editing && !keepsEdit) commit(0, 0);
   f(el || arg);
   if (!/Menu$/.test(name) && !['find', 'newBook', 'openBook', 'myName', 'install', 'share'].includes(name)) focusGrid();
@@ -1124,7 +1218,7 @@ function refreshRibbon() {
   on('bold', s.b); on('italic', s.i); on('underline', s.u); on('wrap', s.w);
   on('left', s.a === 'l'); on('center', s.a === 'c'); on('right', s.a === 'r');
   on('vtop', s.va === 't'); on('vmid', s.va === 'm'); on('vbot', s.va === 'b' || !s.va);
-  on('showFormulas', S.showF); on('grid', S.grid); on('bgToggle', S.bg);
+  on('showFormulas', S.showF); on('grid', S.grid);
   const sf = document.querySelector('.ribbon [data-cmd="font"]'); if (sf) sf.value = s.ff || 'Aptos Narrow';
   const ss = document.querySelector('.ribbon [data-cmd="size"]'); if (ss) { if (![...ss.options].some(o => +o.value === (s.fs || BASE_PT))) ss.add(new Option(s.fs, s.fs)); ss.value = s.fs || BASE_PT; }
   const sn = document.querySelector('.ribbon [data-cmd="numfmt"]'); if (sn) sn.value = s.nf || '';
@@ -1378,7 +1472,7 @@ function fillDir(dir) {
 
 // ================================================================== TÍTULO, USUARIOS, NUBE, AVISOS
 function updateTitle() {
-  const n = S.tree.meta.nombre || lsGet('xw-newname:' + S.book) || 'Libro1';
+  const n = S.tree.meta.nombre || libroById(S.book)?.nombre || lsGet('xw-newname:' + S.book) || 'Libro1';
   if (!S.tree.meta.nombre && S.ready && lsGet('xw-newname:' + S.book)) write({ 'meta/nombre': n }, false);
   U.bookName.textContent = n;
   document.title = `${n} - Excel`;
@@ -1418,8 +1512,7 @@ function toast(msg, kind = 'info', ms = 3500) {
 }
 function hash(s) { let h = 0; for (const ch of s) h = (h * 31 + ch.charCodeAt(0)) | 0; return h; }
 
-// ================================================================== FONDO, FAVICON E INSTALACIÓN (PWA)
-function applyBg() { document.body.classList.toggle('withbg', S.bg); }
+// ================================================================== FAVICON E INSTALACIÓN (PWA)
 function setupFavicon() {
   // Usa la foto del hotel (img/hotel.jpg) como ícono de la pestaña si existe
   const img = new Image();

@@ -17,17 +17,6 @@ button, select, input { font: inherit; color: inherit; }
   letter-spacing: normal; text-transform: none; display: inline-block; white-space: nowrap; direction: ltr;
   -webkit-font-smoothing: antialiased; font-variation-settings: "FILL" 0, "wght" 300, "GRAD" 0, "opsz" 20; user-select: none; }
 
-/* ---------- foto de fondo del hotel ---------- */
-.bgphoto { position: fixed; inset: 0; z-index: -1; display: none;
-  background: url("../img/hotel.jpg") center 30% / cover no-repeat,
-    linear-gradient(160deg, #cfe3ea 0%, #e8eef0 35%, #1d8a7d 70%, #0f5d55 100%); }
-body.withbg { background: transparent; }
-body.withbg .bgphoto { display: block; }
-body.withbg .ribbon, body.withbg .fbar, body.withbg .sheetbar, body.withbg .status { background: rgba(243,243,243,.82); backdrop-filter: blur(10px); }
-body.withbg .gw { background: rgba(255,255,255,.80); }
-body.withbg .chdr, body.withbg .rhdr .rh, body.withbg .ch, body.withbg .corner { background: rgba(243,243,243,.93); }
-body.withbg .titlebar, body.withbg .rtabs { background: rgba(33,115,70,.92); backdrop-filter: blur(8px); }
-
 /* ---------- barra de título ---------- */
 .titlebar { height: 34px; background: var(--green); color: #fff; display: flex; align-items: center; padding: 0 8px; gap: 8px; flex: none; }
 .tb-left, .tb-right { display: flex; align-items: center; gap: 4px; flex: 1; min-width: 0; }
@@ -61,7 +50,6 @@ body.withbg .titlebar, body.withbg .rtabs { background: rgba(33,115,70,.92); bac
 .rtab { background: none; border: 0; color: #fff; padding: 6px 12px 7px; cursor: pointer; font-size: 12.5px; border-radius: 3px 3px 0 0; }
 .rtab:hover { background: rgba(255,255,255,.15); }
 .rtab.on { background: var(--chrome); color: var(--green); font-weight: 600; }
-body.withbg .rtab.on { background: rgba(243,243,243,.95); }
 .rtab.file { background: var(--green-d); font-weight: 600; }
 .rtab.file:hover { background: #10472a; }
 
@@ -179,10 +167,9 @@ body.withbg .rtab.on { background: rgba(243,243,243,.95); }
 .swatches .sw { width: 18px; height: 18px; border: 1px solid #c8c8c8; cursor: pointer; padding: 0; }
 .swatches .sw:hover { outline: 2px solid #f29436; }
 .modal { position: fixed; inset: 0; background: rgba(0,0,0,.35); z-index: 2000; display: flex; align-items: center; justify-content: center; padding: 16px; }
-.modal.hero { background: url("../img/hotel.jpg") center 30% / cover, linear-gradient(160deg, #cfe3ea, #1d8a7d 70%, #0f5d55); }
-.modal.hero::before { content: ""; position: absolute; inset: 0; background: linear-gradient(180deg, rgba(0,0,0,.05), rgba(0,40,25,.55)); }
+.modal.hero { background: linear-gradient(160deg, #2b8a57 0%, #217346 45%, #144d2f 100%); }
 .mbox { position: relative; background: #fff; width: 100%; max-width: 420px; padding: 20px 22px 16px; box-shadow: 0 12px 40px rgba(0,0,0,.3); border-radius: 6px; }
-.hero .mbox { background: rgba(255,255,255,.94); backdrop-filter: blur(6px); }
+.hero .mbox { background: #fff; }
 .mhero { display: flex; gap: 12px; align-items: center; margin-bottom: 8px; }
 .mhero img { width: 48px; height: 48px; border-radius: 10px; }
 .mhero b { display: block; font-size: 18px; color: var(--green); }
@@ -206,7 +193,7 @@ body.withbg .rtab.on { background: rgba(243,243,243,.95); }
 .backstage aside button { background: none; border: 0; color: #fff; text-align: left; padding: 11px 22px; cursor: pointer; font-size: 14px; display: flex; gap: 12px; align-items: center; }
 .backstage aside button:hover { background: rgba(255,255,255,.15); }
 .backstage .bk-back { padding: 14px 22px; }
-.backstage main { flex: 1; padding: 30px 46px; overflow: auto; background: linear-gradient(rgba(255,255,255,.93), rgba(255,255,255,.93)), url("../img/hotel.jpg") center / cover; }
+.backstage main { flex: 1; padding: 30px 46px; overflow: auto; background: #f7f7f7; }
 .backstage h1 { font-weight: 300; font-size: 34px; margin: 0 0 20px; }
 .bk-card { background: #fff; border: 1px solid #e1e1e1; padding: 14px 18px; margin-bottom: 14px; max-width: 640px; border-radius: 4px; }
 .bk-card h2, .bk-card h3 { margin: 0 0 8px; font-weight: 600; }
@@ -221,3 +208,28 @@ body.withbg .rtab.on { background: rgba(243,243,243,.95); }
   .backstage aside button .ms { font-size: 22px; } .backstage main { padding: 20px 16px; }
 }
 @media print { .titlebar, .rtabs, .ribbon, .fbar, .sheetbar, .status { display: none; } }
+
+/* ---------- pantalla inicial: elegir libro ---------- */
+.launcher .lbox { max-width: 520px; padding: 24px 26px 18px; }
+.lname { display: block; color: var(--muted); font-size: 12px; margin: 14px 0 4px; }
+.lname .min { margin-top: 4px; }
+.min.bad { border-color: #a4262c; box-shadow: 0 0 0 1px #a4262c; }
+.lcards { display: flex; flex-direction: column; gap: 10px; margin-top: 6px; }
+.lcard { position: relative; display: flex; align-items: center; gap: 14px; width: 100%; text-align: left; padding: 14px 14px; border: 1px solid #d6d6d6; border-radius: 6px; background: #fff; cursor: pointer; transition: border-color .15s, box-shadow .15s, transform .15s; }
+.lcard:hover, .lcard:focus { border-color: var(--green); box-shadow: 0 4px 14px rgba(33,115,70,.18); outline: none; transform: translateY(-1px); }
+.lcard > .ms { font-size: 30px; color: #fff; background: var(--green); border-radius: 8px; padding: 9px; font-variation-settings: "FILL" 1, "wght" 400, "GRAD" 0, "opsz" 40; }
+.lcard .lt { flex: 1; display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.lcard .lt b { font-size: 15px; color: var(--text); }
+.lcard .lt small { color: var(--muted); font-size: 12px; }
+.lcard em { position: absolute; top: -9px; right: 12px; font-style: normal; font-size: 10.5px; background: var(--green); color: #fff; padding: 1px 8px; border-radius: 9px; }
+.lcard .go { color: #a19f9d; font-size: 22px; }
+.lother { margin-top: 12px; background: none; border: 0; color: var(--green); cursor: pointer; padding: 6px 0; font-weight: 600; }
+.lother:hover { text-decoration: underline; }
+.tbtn.libros { padding: 0 8px; }
+.tbtn.libros span:last-child { font-size: 12px; }
+.loading { position: fixed; inset: 0; z-index: 2500; background: rgba(255,255,255,.6); backdrop-filter: blur(3px); display: flex; align-items: center; justify-content: center; }
+.lbox2 { background: #fff; padding: 22px 30px; border-radius: 8px; box-shadow: 0 10px 34px rgba(0,0,0,.2); display: flex; flex-direction: column; align-items: center; gap: 8px; min-width: 300px; }
+.lbox2 b { font-size: 15px; } .lbox2 span:last-child { color: var(--muted); }
+.spin { width: 30px; height: 30px; border-radius: 50%; border: 3px solid #d8eadf; border-top-color: var(--green); animation: spin 0.9s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
+@media (max-width: 760px) { .tbtn.libros span:last-child { display: none; } }
