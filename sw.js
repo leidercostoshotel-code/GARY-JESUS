@@ -1,6 +1,6 @@
 // Service worker: permite instalar la app y abrirla aunque falle la red.
 // Los datos NO se guardan aquí: van a Firebase (o al navegador en modo local).
-const CACHE = 'excel-hotel-v6';
+const CACHE = 'excel-hotel-v7';
 const SHELL = ['./', 'index.html', 'css/excel.css', 'js/app.js', 'js/ui.js', 'js/formulas.js', 'js/store.js', 'js/xlsxstyles.js',
   'js/firebase-config.js', 'manifest.webmanifest', 'icons/icon-192.png', 'icons/icon-512.png', 'img/hotel.jpg'];
 

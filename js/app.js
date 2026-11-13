@@ -521,7 +521,7 @@ function normalizeInput(text, style) {
   if (/^[-+]?\d+(\.\d+)?%$/.test(t)) { v = String(parseFloat(t) / 100); if (!s.nf) s.nf = 'pct'; }
   else if (/^\d{1,2}\/\d{1,2}\/\d{2,4}$/.test(t) && parseDate(t) !== null) { v = String(parseDate(t)); if (!s.nf) s.nf = 'date'; }
   else if (/^-?\d{1,3}(,\d{3})+(\.\d+)?$/.test(t)) { v = t.replace(/,/g, ''); if (!s.nf) s.nf = 'num'; }
-  else if (/^(S\/|\$)\s?-?[\d,]+(\.\d+)?$/.test(t)) { if (!s.nf) s.nf = t.startsWith('$') ? 'usd' : 'cur'; v = t.replace(/^(S\/|\$)\s?/, '').replace(/,/g, ''); }
+  else if (/^(S\/\.?|\$|US\$)\s?-?[\d,]+(\.\d+)?$/i.test(t)) { if (!s.nf) s.nf = /\$/.test(t) ? 'usd' : 'cur'; v = t.replace(/^(S\/\.?|\$|US\$)\s?/i, '').replace(/,/g, ''); }
   return { v, s };
 }
 function cellObj(v, s) {
@@ -648,7 +648,34 @@ function parseTSV(t) {
   if (f !== '' || row.length) { row.push(f); rows.push(row); }
   return rows;
 }
-function doPaste(text) {
+// Tabla copiada desde un correo (Gmail, Outlook), una web o Word: llega como HTML
+function htmlRows(html) {
+  if (!html || !/<table/i.test(html)) return null;
+  const doc = new DOMParser().parseFromString(html, 'text/html');
+  const table = doc.querySelector('table'); if (!table) return null;
+  const rows = [];
+  const cellText = td => {
+    const c = td.cloneNode(true);
+    c.querySelectorAll('br').forEach(b => b.replaceWith('\n'));
+    c.querySelectorAll('p,div,li').forEach(b => b.append('\n'));
+    c.querySelectorAll('style,script').forEach(b => b.remove());
+    return c.textContent.replace(/\u00a0/g, ' ').replace(/[ \t]+/g, ' ').replace(/ ?\n ?/g, '\n').replace(/\n{2,}/g, '\n').trim();
+  };
+  for (const tr of table.querySelectorAll('tr')) {
+    if (tr.closest('table') !== table) continue; // ignora tablas anidadas
+    const row = [];
+    for (const td of tr.children) {
+      if (!/^(TD|TH)$/.test(td.tagName)) continue;
+      const st = (td.getAttribute('style') || '') + ';' + [...td.querySelectorAll('[style]')].map(x => x.getAttribute('style')).join(';');
+      const bold = td.tagName === 'TH' || !!td.querySelector('b,strong') || /font-weight:\s*(bold|[6-9]00)/i.test(st);
+      row.push({ t: cellText(td), b: bold });
+      for (let k = 1; k < (+td.getAttribute('colspan') || 1); k++) row.push({ t: '' });
+    }
+    if (row.length) rows.push(row);
+  }
+  return rows.length ? rows : null;
+}
+function doPaste(text, html) {
   const R = rng(), upd = {}, cells = cellsOf(S.sid);
   const norm = s => (s || '').replace(/\r\n?/g, '\n').replace(/\n$/, '');
   const clip = S.clip;
@@ -669,11 +696,15 @@ function doPaste(text) {
     select(R.r1, R.c1, R.r1 + th - 1, R.c1 + tw - 1, false);
     return;
   }
-  const rows = parseTSV(text);
+  const hrows = htmlRows(html);
+  const rows = hrows || parseTSV(text).map(r => r.map(t => ({ t })));
   if (!rows.length) return;
-  rows.forEach((row, i) => row.forEach((t, j) => {
+  rows.forEach((row, i) => row.forEach((x, j) => {
     const k = keyOf(R.r1 + i, R.c1 + j), old = cells[k];
-    const { v, s } = normalizeInput(t, old?.s);
+    const clean = String(x.t ?? '').replace(/\u00a0/g, ' ').replace(/\r/g, '').trim();
+    const { v, s } = normalizeInput(clean, old?.s);
+    if (x.b) s.b = 1;
+    if (clean.includes('\n')) s.w = 1;
     upd[`celdas/${S.sid}/${k}`] = cellObj(v, s);
   }));
   write(upd);
@@ -1607,7 +1638,7 @@ function bindUI() {
   fx.addEventListener('input', () => { if (!S.editing) startEdit(fx.value, 'edit', 'bar'); S.point = null; ed.value = fx.value; placeEditor(); schedule(); });
   ed.addEventListener('copy', e => { if (!S.editing) doCopy(false, e); });
   ed.addEventListener('cut', e => { if (!S.editing) doCopy(true, e); });
-  ed.addEventListener('paste', e => { if (S.editing) return; e.preventDefault(); doPaste(e.clipboardData.getData('text/plain')); });
+  ed.addEventListener('paste', e => { if (S.editing) return; e.preventDefault(); doPaste(e.clipboardData.getData('text/plain'), e.clipboardData.getData('text/html')); });
 
   namebox.addEventListener('keydown', e => {
     if (e.key !== 'Enter' && e.key !== 'Escape') return;
