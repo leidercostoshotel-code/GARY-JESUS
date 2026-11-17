@@ -126,10 +126,13 @@ async function firebaseStore(book, h) {
   const cfg = { ...firebaseConfig, databaseURL: firebaseConfig.databaseURL || `https://${firebaseConfig.projectId}-default-rtdb.firebaseio.com` };
   const app = appM.initializeApp(cfg);
   const auth = authM.getAuth(app);
+  // Solo para pruebas locales con el emulador de Firebase (no se usa en producción)
+  if (firebaseConfig.emulador) authM.connectAuthEmulator(auth, firebaseConfig.emulador.auth, { disableWarnings: true });
   let user;
   try { user = (await authM.signInAnonymously(auth)).user; }
   catch (e) { h.onError('No se pudo iniciar sesión en Firebase. Habilita el acceso "Anónimo" en Authentication. (' + e.code + ')'); throw e; }
   const db = dbM.getDatabase(app);
+  if (firebaseConfig.emulador) dbM.connectDatabaseEmulator(db, '127.0.0.1', firebaseConfig.emulador.db);
   const root = ref(db, 'libros/' + book);
   const me = user.uid + '-' + randomId();
   const OUTBOX = 'excelweb-outbox:' + book;
