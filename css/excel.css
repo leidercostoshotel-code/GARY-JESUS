@@ -22,7 +22,7 @@ button, select, input { font: inherit; color: inherit; }
 .tb-left, .tb-right { display: flex; align-items: center; gap: 4px; flex: 1; min-width: 0; }
 .tb-right { justify-content: flex-end; }
 .logo img { width: 22px; height: 22px; border-radius: 4px; display: block; box-shadow: 0 0 0 1px rgba(255,255,255,.4); }
-.autosave { display: flex; align-items: center; gap: 6px; margin: 0 6px; font-size: 12px; white-space: nowrap; }
+.autosave { display: flex; align-items: center; gap: 6px; margin: 0 6px 0 12px; font-size: 12px; white-space: nowrap; }
 .switch { width: 28px; height: 14px; border-radius: 7px; border: 1px solid #fff; position: relative; }
 .switch.on { background: #fff; }
 .switch i { position: absolute; top: 2px; left: 2px; width: 8px; height: 8px; border-radius: 50%; background: #fff; }
@@ -92,7 +92,8 @@ button, select, input { font: inherit; color: inherit; }
 .fxb:hover { background: #e1e1e1; }
 .fxb .ms { font-size: 18px; }
 .fx { font-family: "Times New Roman", serif; font-size: 15px; font-weight: 400; }
-.fxin { flex: 1; height: 23px; border: 1px solid #c8c8c8; padding: 0 6px; outline: none; font-family: var(--cellfont); font-size: 14px; }
+.fxin { flex: 1; height: 23px; border: 1px solid #c8c8c8; padding: 2px 6px 0; outline: none; font-family: var(--cellfont); font-size: 14px; resize: none; overflow: hidden; white-space: pre; line-height: 18px; }
+.fxin:focus { overflow-y: auto; white-space: pre-wrap; position: relative; z-index: 20; box-shadow: 0 4px 10px rgba(0,0,0,.12); }
 .fxin:focus { border-color: var(--green); }
 
 /* ---------- cuadrícula ---------- */

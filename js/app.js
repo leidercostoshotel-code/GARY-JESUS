@@ -479,12 +479,18 @@ function placeEditor() {
   ed.style.left = k.x + 'px'; ed.style.top = k.y + 'px';
   if (!S.editing) { ed.style.width = k.w + 'px'; ed.style.height = k.h + 'px'; return; }
   const s = cellAt(S.editing.r, S.editing.c)?.s || {};
+  // El editor se ve igual que la celda: color, relleno, cursiva, subrayado, alineación y ajuste de texto
   ed.style.font = fontCss(s, S.z);
   ed.style.fontWeight = s.b ? 700 : 400;
+  ed.style.color = s.c || '';
+  ed.style.background = s.f || '#fff';
+  ed.style.textDecoration = s.u ? 'underline' : '';
+  ed.style.textAlign = ed.value[0] === '=' ? 'left' : ({ l: 'left', c: 'center', r: 'right' }[s.a] || 'left');
+  ed.style.whiteSpace = s.w ? 'pre-wrap' : 'pre';
   ed.style.minWidth = k.w + 1 + 'px'; ed.style.minHeight = k.h + 1 + 'px';
   ed.style.width = '0px'; ed.style.height = '0px';
-  ed.style.width = Math.min(Math.max(k.w + 1, ed.scrollWidth + 8), 900) + 'px';
-  ed.style.height = Math.max(k.h + 1, ed.scrollHeight) + 'px';
+  ed.style.width = (s.w ? k.w + 1 : Math.min(Math.max(k.w + 1, ed.scrollWidth + 8), 900)) + 'px';
+  ed.style.height = Math.max(k.h + 1, ed.scrollHeight + 2) + 'px';
 }
 function startEdit(text, mode = 'enter', src = 'cell') {
   if (S.editing) return;
@@ -502,6 +508,7 @@ function startEdit(text, mode = 'enter', src = 'cell') {
 }
 function stopEdit() {
   S.editing = null; S.point = null; hideSug(); acCache = null;
+  for (const p of ['color', 'background', 'textDecoration', 'textAlign', 'whiteSpace']) U.ed.style[p] = '';
   U.ed.classList.add('idle'); U.ed.value = ''; U.ed.style.width = ''; U.ed.style.height = '';
   U.ed.style.minWidth = ''; U.ed.style.minHeight = '';
   U.smode.textContent = 'Listo';
@@ -1813,7 +1820,10 @@ function bindUI() {
   });
   ed.addEventListener('keydown', e => onKey(e, 'cell'));
   fx.addEventListener('keydown', e => onKey(e, 'bar'));
-  fx.addEventListener('focus', () => { if (!S.editing) { startEdit(null, 'edit', 'bar'); } });
+  const fxSize = () => { fx.style.height = 'auto'; fx.style.height = Math.min(120, Math.max(23, fx.scrollHeight + 2)) + 'px'; };
+  fx.addEventListener('focus', () => { if (!S.editing) { startEdit(null, 'edit', 'bar'); } fxSize(); });
+  fx.addEventListener('input', fxSize);
+  fx.addEventListener('blur', () => { fx.style.height = ''; });
   fx.addEventListener('input', () => { if (!S.editing) startEdit(fx.value, 'edit', 'bar'); S.point = null; ed.value = fx.value; placeEditor(); fnSuggest(fx); schedule(); });
   ed.addEventListener('copy', e => { if (!S.editing) doCopy(false, e); });
   ed.addEventListener('cut', e => { if (!S.editing) doCopy(true, e); });
@@ -1856,6 +1866,11 @@ function onKey(e, src) {
     }
     if (k === 'F4') { e.preventDefault(); toggleAbs(src === 'bar' ? U.fx : U.ed); return; }
     if (k === 'Enter' && e.altKey && src === 'cell') { e.preventDefault(); insertAtCaret('\n'); return; }
+    if (k === 'Enter' && e.altKey && src === 'bar') {
+      e.preventDefault(); const f = U.fx, p0 = f.selectionStart;
+      f.value = f.value.slice(0, p0) + '\n' + f.value.slice(f.selectionEnd); f.setSelectionRange(p0 + 1, p0 + 1);
+      U.ed.value = f.value; placeEditor(); return;
+    }
     if (k === 'Enter') { e.preventDefault(); commit(e.shiftKey ? -1 : 1, 0); return; }
     if (k === 'Tab') { e.preventDefault(); commit(0, e.shiftKey ? -1 : 1); return; }
     if (k === 'Escape') { e.preventDefault(); cancel(); return; }

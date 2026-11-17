@@ -102,7 +102,7 @@ export function buildUI(root) {
     <button class="fxb" data-cmd="cancelEdit" title="Cancelar">${ic('close')}</button>
     <button class="fxb" data-cmd="commitEdit" title="Introducir">${ic('check')}</button>
     <button class="fxb" data-cmd="fnMenu" title="Insertar función"><i class="fx">fx</i></button>
-    <input id="fx" class="fxin" spellcheck="false" autocomplete="off">
+    <textarea id="fx" class="fxin" rows="1" spellcheck="false" autocomplete="off"></textarea>
   </div>
   <div class="gw" id="gw">
     <div class="gc" id="gc">
