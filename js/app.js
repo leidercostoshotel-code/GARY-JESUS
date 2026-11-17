@@ -163,9 +163,18 @@ async function init() {
     store = await createStore(S.book, {
       onMeta: m => { S.tree.meta = m || {}; S.metaLoaded = true; updateTitle(); maybeUpgrade(); },
       onSheet: (sid, v) => {
+        const prevName = S.tree.hojas[sid]?.nombre;
         if (v) S.tree.hojas[sid] = v; else { delete S.tree.hojas[sid]; delete S.tree.celdas[sid]; extents.delete(sid); loaded.delete(sid); loadReq.delete(sid); }
         calc.reset(); dataDirty = true;
-        if (sid === S.sid) { geomDirty = true; if (!v && S.ready) switchSheet(sortedSheets()[0]?.[0]); }
+        const op = v && v.estructura;
+        if (v && !(sid in lastOp)) lastOp[sid] = op ? op.id : null; // primera vez que se ve la hoja
+        else if (op && op.id !== lastOp[sid]) { lastOp[sid] = op.id; if (!myOps.has(op.id)) remoteStructure(sid, op); }
+        if (!v && S.editing && S.editing.sid === sid) stopEdit();
+        if (!v && S.clip && S.clip.sid === sid) S.clip = null;
+        if (sid === S.sid) {
+          geomDirty = true;
+          if (!v && S.ready) { switchSheet(sortedSheets()[0]?.[0]); if (prevName && !myDeletes.has(sid)) toast(`La hoja «${prevName}» fue eliminada por otro usuario`, 'warn', 6000); }
+        }
         scheduleTabs(); schedule();
       },
       onCell: (sid, k, v) => {
@@ -560,6 +569,7 @@ function write(updates, record = true) {
   return store.write(updates);
 }
 function undo() {
+  while (S.undo.length && S.undo[S.undo.length - 1].sid && !S.tree.hojas[S.undo[S.undo.length - 1].sid] && !Object.keys(S.undo[S.undo.length - 1].after).some(p => /^hojas\/[^/]+$/.test(p))) S.undo.pop();
   const e = S.undo.pop(); if (!e) return toast('No hay nada que deshacer');
   S.redo.push(e); store.write(e.before);
   if (e.sid !== S.sid && S.tree.hojas[e.sid]) switchSheet(e.sid);
@@ -820,7 +830,14 @@ function shiftStructure(axis, at, n) {
     if (x.v && x.v[0] === '=') x.v = adjustRefs(x.v, name, name, axis, at, n);
     nm[keyOf(r, c)] = x;
   }
-  const upd = { ['celdas/' + sid]: Object.keys(nm).length ? nm : null };
+  // Solo se escriben las celdas que cambian de lugar: no se pisa lo que otros escriben en el resto de la hoja
+  const upd = {};
+  for (const k of Object.keys(cells)) if (!(k in nm)) upd[`celdas/${sid}/${k}`] = null;
+  for (const [k, x] of Object.entries(nm)) if (JSON.stringify(cells[k]) !== JSON.stringify(x)) upd[`celdas/${sid}/${k}`] = x;
+  // Aviso a los demás usuarios para que muevan su selección y la celda que están editando
+  const op = { id: Math.random().toString(36).slice(2, 10), axis, at, n, quien: S.me.nombre };
+  myOps.add(op.id); lastOp[sid] = op.id;
+  upd[`hojas/${sid}/estructura`] = op;
   for (const [sid2, m] of Object.entries(S.tree.celdas)) {
     if (sid2 === sid) continue;
     const own = S.tree.hojas[sid2]?.nombre || '';
@@ -839,6 +856,27 @@ function shiftStructure(axis, at, n) {
   }
   upd[`hojas/${sid}/${prop}`] = Object.keys(nn).length ? nn : null;
   write(upd);
+}
+// Otro usuario insertó o eliminó filas/columnas: todo lo local se mueve con ellas (como Excel compartido)
+const myOps = new Set(), lastOp = {}, myDeletes = new Set();
+function remoteStructure(sid, op) {
+  const k = op.axis === 'r' ? 'r' : 'c', end = op.at - op.n - 1;
+  const f = i => op.n > 0 ? (i >= op.at ? i + op.n : i) : (i >= op.at && i <= end ? null : i > end ? i + op.n : i);
+  const que = `${Math.abs(op.n)} ${op.axis === 'r' ? (Math.abs(op.n) > 1 ? 'filas' : 'fila') : (Math.abs(op.n) > 1 ? 'columnas' : 'columna')}`;
+  if (S.editing && S.editing.sid === sid) {
+    const nv = f(S.editing[k]);
+    if (nv === null) { stopEdit(); toast(`${op.quien} eliminó la ${op.axis === 'r' ? 'fila' : 'columna'} que estabas editando`, 'warn', 6000); }
+    else S.editing[k] = nv;
+  }
+  if (sid === S.sid) {
+    const a = k === 'r' ? ['ar', 'fr'] : ['ac', 'fc'];
+    for (const key of a) { const nv = f(S.sel[key]); S.sel[key] = nv === null ? Math.max(0, op.at) : nv; }
+    geomDirty = true; onSel();
+  }
+  if (S.clip && S.clip.sid === sid) S.clip = null;
+  const touches = e => Object.keys(e.after).some(p => p.startsWith(`celdas/${sid}/`) || p.startsWith(`hojas/${sid}/`));
+  S.undo = S.undo.filter(e => !touches(e)); S.redo = S.redo.filter(e => !touches(e));
+  if (sid === S.sid) toast(`${op.quien} ${op.n > 0 ? 'insertó' : 'eliminó'} ${que}`, 'info');
 }
 const insRows = () => { const R = rng(); shiftStructure('r', R.r1, R.r2 - R.r1 + 1); };
 const insCols = () => { const R = rng(); shiftStructure('c', R.c1, R.c2 - R.c1 + 1); };
@@ -927,6 +965,7 @@ async function deleteSheet(sid) {
   const orig = S.tree.hojas[sid].origen || (/^s\d{3}$/.test(sid) ? S.tree.hojas[sid].nombre : null);
   const del = { ['hojas/' + sid]: null, ['celdas/' + sid]: null, ['bases/' + sid]: null };
   if (orig) del[`meta/borradas/${fnv(orig.toLowerCase())}`] = true;
+  myDeletes.add(sid);
   write(del);
   if (sid === S.sid) switchSheet(list[i + 1] || list[i - 1]);
   focusGrid();
