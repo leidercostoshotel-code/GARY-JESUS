@@ -4,7 +4,7 @@
 import { createStore, usingFirebase, getIn } from './store.js';
 import {
   Calc, colName, keyOf, parseKey, display, shiftFormula, transposeFormula, adjustRefs, renameSheetRefs, parseDate, quoteSheet,
-  formulaRefs, toEnglish, FUNCTION_LIST, FErr, compareValues, todaySerial, nowSerial, tokenize, fmtGeneral
+  formulaRefs, toEnglish, FUNCTION_LIST, ALIAS, FErr, compareValues, todaySerial, nowSerial, tokenize, fmtGeneral
 } from './formulas.js';
 import { buildUI, menu, closeMenu, dialog, FONTS, SIZES } from './ui.js';
 import { extractStyles } from './xlsxstyles.js';
@@ -424,7 +424,7 @@ function select(r, c, fr = r, fc = c, scroll = true) {
 let presT = 0;
 function onSel() {
   const R = rng();
-  U.namebox.value = (R.r1 === R.r2 && R.c1 === R.c2) ? keyOf(S.sel.ar, S.sel.ac) : `${keyOf(R.r1, R.c1)}:${keyOf(R.r2, R.c2)}`;
+  U.namebox.value = drag && (R.r1 !== R.r2 || R.c1 !== R.c2) ? `${R.r2 - R.r1 + 1}F x ${R.c2 - R.c1 + 1}C` : keyOf(S.sel.ar, S.sel.ac); // como Excel
   if (!S.editing) U.fx.value = cellAt(S.sel.ar, S.sel.ac)?.v ?? '';
   refreshRibbon(); updateStats(); schedule(); savePos();
   clearTimeout(presT);
@@ -501,7 +501,7 @@ function startEdit(text, mode = 'enter', src = 'cell') {
   schedule();
 }
 function stopEdit() {
-  S.editing = null; S.point = null;
+  S.editing = null; S.point = null; hideSug(); acCache = null;
   U.ed.classList.add('idle'); U.ed.value = ''; U.ed.style.width = ''; U.ed.style.height = '';
   U.ed.style.minWidth = ''; U.ed.style.minHeight = '';
   U.smode.textContent = 'Listo';
@@ -1452,8 +1452,9 @@ function pickFromList() {
 }
 // Vínculo a este rango: copia un enlace que abre el libro en esta hoja y celda
 async function linkToRange() {
-  const url = `${location.origin}${location.pathname}#libro=${S.book}&hoja=${S.sid}&celda=${U.namebox.value}`;
-  try { await navigator.clipboard.writeText(url); toast('Vínculo copiado: al abrirlo, va directo a ' + U.namebox.value, 'ok'); }
+  const R0 = rng(), ref = R0.r1 === R0.r2 && R0.c1 === R0.c2 ? keyOf(R0.r1, R0.c1) : `${keyOf(R0.r1, R0.c1)}:${keyOf(R0.r2, R0.c2)}`;
+  const url = `${location.origin}${location.pathname}#libro=${S.book}&hoja=${S.sid}&celda=${ref}`;
+  try { await navigator.clipboard.writeText(url); toast('Vínculo copiado: al abrirlo, va directo a ' + ref, 'ok'); }
   catch { dialog({ title: 'Vínculo a este rango', input: url, cancel: null }); }
 }
 function fnMenu(at) {
@@ -1739,7 +1740,8 @@ function bindUI() {
     drag = { type: 'sel' };
   });
   gc.addEventListener('dblclick', e => {
-    const h = hit(e); if (h.inCol || h.inRow || e.target.dataset.fill) return;
+    if (e.target.dataset.fill) { fillDownToData(); return; }
+    const h = hit(e); if (h.inCol || h.inRow) return;
     select(h.r, h.c, h.r, h.c, false); startEdit(null, 'edit');
   });
   gc.addEventListener('mousemove', e => {
@@ -1794,6 +1796,7 @@ function bindUI() {
     if (!drag) return;
     clearInterval(autoT); autoT = 0;
     const d = drag; drag = null;
+    U.namebox.value = keyOf(S.sel.ar, S.sel.ac);
     if (d.type === 'rc' && d.w) { const R = rng(); const full = R.r1 === 0 && R.r2 >= G.nr - 1 && d.c >= R.c1 && d.c <= R.c2; setSize('c', full ? range(R.c1, R.c2) : [d.c], d.w); }
     if (d.type === 'rr' && d.h) { const R = rng(); const full = R.c1 === 0 && R.c2 >= G.nc - 1 && d.r >= R.r1 && d.r <= R.r2; setSize('r', full ? range(R.r1, R.r2) : [d.r], d.h); }
     if (d.type === 'fill') { S.fillPrev = null; if (d.dst) doFill(d.src, d.dst); schedule(); }
@@ -1802,15 +1805,16 @@ function bindUI() {
   });
 
   // ---- teclado
-  ed.addEventListener('input', () => {
+  ed.addEventListener('input', e => {
     if (!S.editing) { const v = ed.value; startEdit(v, 'enter'); ed.value = v; ed.setSelectionRange(v.length, v.length); }
     S.point = null;
-    fx.value = ed.value; placeEditor(); schedule();
+    if (e.inputType && e.inputType.startsWith('insert')) autoComplete();
+    fx.value = ed.value; placeEditor(); fnSuggest(ed); schedule();
   });
   ed.addEventListener('keydown', e => onKey(e, 'cell'));
   fx.addEventListener('keydown', e => onKey(e, 'bar'));
   fx.addEventListener('focus', () => { if (!S.editing) { startEdit(null, 'edit', 'bar'); } });
-  fx.addEventListener('input', () => { if (!S.editing) startEdit(fx.value, 'edit', 'bar'); S.point = null; ed.value = fx.value; placeEditor(); schedule(); });
+  fx.addEventListener('input', () => { if (!S.editing) startEdit(fx.value, 'edit', 'bar'); S.point = null; ed.value = fx.value; placeEditor(); fnSuggest(fx); schedule(); });
   ed.addEventListener('copy', e => { if (!S.editing) doCopy(false, e); });
   ed.addEventListener('cut', e => { if (!S.editing) doCopy(true, e); });
   ed.addEventListener('paste', e => { if (S.editing) return; e.preventDefault(); doPaste(e.clipboardData.getData('text/plain'), e.clipboardData.getData('text/html')); });
@@ -1845,6 +1849,12 @@ function bindUI() {
 function onKey(e, src) {
   const ctrl = e.ctrlKey || e.metaKey, k = e.key;
   if (S.editing) {
+    if (sug) {
+      if (k === 'ArrowDown' || k === 'ArrowUp') { e.preventDefault(); sug.i = (sug.i + (k === 'ArrowDown' ? 1 : -1) + sug.list.length) % sug.list.length; drawSug(); return; }
+      if (k === 'Tab' || (k === 'Enter' && sug.nav)) { e.preventDefault(); acceptSug(); return; }
+      if (k === 'Escape') { e.preventDefault(); hideSug(); return; }
+    }
+    if (k === 'F4') { e.preventDefault(); toggleAbs(src === 'bar' ? U.fx : U.ed); return; }
     if (k === 'Enter' && e.altKey && src === 'cell') { e.preventDefault(); insertAtCaret('\n'); return; }
     if (k === 'Enter') { e.preventDefault(); commit(e.shiftKey ? -1 : 1, 0); return; }
     if (k === 'Tab') { e.preventDefault(); commit(0, e.shiftKey ? -1 : 1); return; }
@@ -1871,6 +1881,9 @@ function onKey(e, src) {
   if (k === 'Escape') { S.clip = null; S.painter = null; U.gw.classList.remove('painting'); schedule(); return; }
   if (e.altKey && (k === '=' || k === '+')) { e.preventDefault(); autoFn('SUMA'); return; }
   if (e.altKey && k === 'ArrowDown') { e.preventDefault(); pickFromList(); return; }
+  if (k === ' ' && ctrl && !e.shiftKey) { e.preventDefault(); const R0 = rng(); select(0, R0.c1, G.nr - 1, R0.c2, false); return; }
+  if (k === ' ' && e.shiftKey && !ctrl) { e.preventDefault(); const R0 = rng(); select(R0.r1, 0, R0.r2, G.nc - 1, false); return; }
+  if (k === ' ' && e.shiftKey && ctrl) { e.preventDefault(); select(0, 0, G.nr - 1, G.nc - 1, false); return; }
   if (ctrl && e.altKey && k.toLowerCase() === 'v') { e.preventDefault(); const r = cellRect(S.sel.ar, S.sel.ac), g = U.gc.getBoundingClientRect(); menu(pasteSpecialItems(), { x: g.left + r.x + r.w, y: g.top + r.y }); return; }
   if (ctrl && k === '1') { e.preventDefault(); formatCells(); return; }
   if (ctrl) {
@@ -1879,6 +1892,84 @@ function onKey(e, src) {
     if (l === 'z' && e.shiftKey) { e.preventDefault(); redo(); return; }
     if (map[l]) { e.preventDefault(); map[l](); return; }
   }
+}
+// ---------- Autocompletar como Excel: sugiere un texto ya escrito en la columna
+let acCache = null;
+function autoComplete() {
+  const ed = U.ed, e = S.editing;
+  if (!e || e.mode !== 'enter' || document.activeElement !== ed) return;
+  const typed = ed.value;
+  if (!typed || typed[0] === '=' || /^[-+\d.,\/]+$/.test(typed) || ed.selectionStart !== typed.length) return;
+  if (!acCache || acCache.key !== `${e.sid}:${e.c}`) {
+    const vals = new Map();
+    for (const [k, cell] of Object.entries(cellsOf(e.sid))) {
+      const p = parseKey(k);
+      if (!p || p.c !== e.c || p.r === e.r || !cell.v || cell.v[0] === '=' || !isNaN(+cell.v)) continue;
+      const v = cell.v.replace(/^'/, ''), low = v.toLowerCase();
+      if (!vals.has(low)) vals.set(low, v);
+    }
+    acCache = { key: `${e.sid}:${e.c}`, vals: [...vals.entries()].sort((a, b) => a[0].localeCompare(b[0], 'es')) };
+  }
+  const low = typed.toLowerCase();
+  const matches = acCache.vals.filter(([l]) => l.startsWith(low) && l.length > low.length);
+  if (matches.length !== 1 && !(matches.length > 1 && matches.every(([l]) => l === matches[0][0]))) return; // Excel solo completa si hay una sola opción
+  const full = matches[0][1]; // como Excel: toma las mayúsculas/minúsculas del dato ya escrito
+  ed.value = full; ed.setSelectionRange(typed.length, full.length);
+}
+// ---------- Lista de funciones al escribir una fórmula (Tab para aceptar)
+const FN_NAMES = [...new Set([...Object.keys(ALIAS), ...FUNCTION_LIST.map(f => f[0])])].sort();
+const FN_DESC = Object.fromEntries(FUNCTION_LIST.map(([n, d]) => [n, d]));
+let sug = null, sugEl = null;
+function fnSuggest(el) {
+  const v = el.value, pos = el.selectionStart;
+  const m = v[0] === '=' ? /(?:^=|[-+*/^&=<>(,;:\s])([A-Za-zÁÉÍÓÚÑáéíóúñ][A-Za-zÁÉÍÓÚÑáéíóúñ.]*)$/.exec(v.slice(0, pos)) : null;
+  if (!m) return hideSug();
+  const w = m[1].toUpperCase();
+  const list = FN_NAMES.filter(n => n.startsWith(w)).slice(0, 10);
+  if (!list.length || (list.length === 1 && list[0] === w && v[pos] === '(')) return hideSug();
+  sug = { el, list, i: 0, start: pos - m[1].length, end: pos, nav: false };
+  drawSug();
+}
+function drawSug() {
+  if (!sugEl) { sugEl = document.createElement('div'); sugEl.className = 'fnsug'; document.body.appendChild(sugEl); sugEl.addEventListener('mousedown', ev => { ev.preventDefault(); const it = ev.target.closest('[data-i]'); if (it) { sug.i = +it.dataset.i; acceptSug(); } }); }
+  sugEl.innerHTML = sug.list.map((n, i) => `<div data-i="${i}" class="${i === sug.i ? 'on' : ''}"><span class="ms">function</span><b>${n}</b>${i === sug.i && FN_DESC[n] ? `<small>${FN_DESC[n]}</small>` : ''}</div>`).join('');
+  const r = (sug.el === U.fx ? U.fx : U.ed).getBoundingClientRect();
+  sugEl.style.left = r.left + 'px'; sugEl.style.top = r.bottom + 2 + 'px'; sugEl.style.display = 'block';
+  sug.nav = sug.i > 0;
+}
+function hideSug() { sug = null; if (sugEl) sugEl.style.display = 'none'; }
+function acceptSug() {
+  const { el, list, i, start, end } = sug, name = list[i];
+  hideSug();
+  el.value = el.value.slice(0, start) + name + '(' + el.value.slice(end);
+  const p = start + name.length + 1; el.focus(); el.setSelectionRange(p, p);
+  (el === U.ed ? U.fx : U.ed).value = el.value; placeEditor(); schedule();
+}
+// ---------- F4: alterna referencias absolutas/relativas en la referencia donde está el cursor
+function toggleAbs(el) {
+  const v = el.value; if (v[0] !== '=') return;
+  const pos = el.selectionStart, re = /(\$?)([A-Za-z]{1,3})(\$?)(\d+)/g; let m;
+  while ((m = re.exec(v))) {
+    const a = m.index, b = a + m[0].length;
+    if (pos < a || pos > b) continue;
+    const prev = v[a - 1]; if (prev && /[A-Za-z_.]/.test(prev)) continue;
+    const st = (m[1] ? 2 : 0) + (m[3] ? 1 : 0); // 0:A1 3:$A$1 1:A$1 2:$A1
+    const next = { 0: 3, 3: 1, 1: 2, 2: 0 }[st];
+    const t = (next & 2 ? '$' : '') + m[2].toUpperCase() + (next & 1 ? '$' : '') + m[4];
+    el.value = v.slice(0, a) + t + v.slice(b);
+    el.setSelectionRange(a + t.length, a + t.length);
+    (el === U.ed ? U.fx : U.ed).value = el.value; placeEditor(); schedule();
+    return;
+  }
+}
+// ---------- Doble clic en el controlador de relleno: rellena hasta donde llegan los datos vecinos
+function fillDownToData() {
+  const R0 = rng();
+  const has = (r, c) => c >= 0 && c < G.nc && filled(r, c);
+  let side = has(R0.r2 + 1, R0.c1 - 1) ? R0.c1 - 1 : has(R0.r2 + 1, R0.c2 + 1) ? R0.c2 + 1 : -1;
+  if (side < 0) return;
+  let end = R0.r2; while (has(end + 1, side)) end++;
+  if (end > R0.r2) doFill(R0, { ...R0, r2: end });
 }
 function fillDir(dir) {
   const R = rng();
