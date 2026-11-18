@@ -762,7 +762,7 @@ function tsvOf(R) {
 function doCopy(cut, ev) {
   const R = boundedSel();
   const text = tsvOf(R);
-  S.clip = { sid: S.sid, ...R, m: selectionMatrix(R), text, cut };
+  S.clip = { sid: S.sid, ...R, m: selectionMatrix(R), text, cut }; S.textClip = null;
   if (ev) { ev.clipboardData.setData('text/plain', text); ev.preventDefault(); }
   else if (navigator.clipboard) navigator.clipboard.writeText(text).catch(() => {});
   schedule();
@@ -874,6 +874,7 @@ async function pasteMode(mode = 'all') {
       }
     } else text = await navigator.clipboard.readText();
   } catch { /* sin permiso: usa lo copiado en esta página */ }
+  if (text == null && !S.clip && S.textClip) text = S.textClip;
   if (text == null && !S.clip) return toast('El navegador no dejó leer el portapapeles. Usa Ctrl+V para pegar.');
   doPaste(text, html, mode);
 }
@@ -1611,6 +1612,46 @@ function insertAtCaret(t) {
   ed.setSelectionRange(p + t.length, p + t.length); U.fx.value = ed.value; ed.focus(); placeEditor(); schedule();
 }
 const pasteFromButton = () => pasteMode('all');
+// ---------- Menú del clic derecho mientras se edita una celda: actúa sobre el texto seleccionado
+function editReplace(el, text) {
+  const a = el.selectionStart, z = el.selectionEnd;
+  el.value = el.value.slice(0, a) + text + el.value.slice(z);
+  el.setSelectionRange(a + text.length, a + text.length);
+  (el === U.ed ? U.fx : U.ed).value = el.value;
+  placeEditor(); schedule();
+}
+function editCopy(el, cut) {
+  const t = el.value.slice(el.selectionStart, el.selectionEnd);
+  if (!t) return toast('Selecciona primero el texto que quieres ' + (cut ? 'cortar' : 'copiar'));
+  S.textClip = t; S.clip = null;
+  if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(t).catch(() => { try { document.execCommand('copy'); } catch { /* queda en la página */ } });
+  else { try { document.execCommand('copy'); } catch { /* queda en la página */ } }
+  if (cut) editReplace(el, '');
+  el.focus();
+}
+async function editPaste(el) {
+  let t = null;
+  try { t = await navigator.clipboard.readText(); } catch { t = S.textClip; }
+  if (t == null || t === '') t = S.textClip;
+  if (!t) return toast('Usa Ctrl+V para pegar');
+  el.focus(); editReplace(el, t.replace(/\r\n?/g, '\n'));
+}
+function editMenu(x, y, el) {
+  const has = el.selectionEnd > el.selectionStart, rich = has && el.value[0] !== '=';
+  const sel = () => ({ a: el.selectionStart, z: el.selectionEnd });
+  menu([
+    { icon: 'content_cut', label: 'Cortar', hint: 'Ctrl+X', disabled: !has, run: () => editCopy(el, true) },
+    { icon: 'content_copy', label: 'Copiar', hint: 'Ctrl+C', disabled: !has, run: () => editCopy(el, false) },
+    { icon: 'content_paste', label: 'Pegar', hint: 'Ctrl+V', run: () => editPaste(el) },
+    '-',
+    { icon: 'format_bold', label: 'Negrita', hint: 'Ctrl+N', disabled: !rich, run: () => applyRun(sel(), 'b', 'toggle') },
+    { icon: 'format_italic', label: 'Cursiva', hint: 'Ctrl+K', disabled: !rich, run: () => applyRun(sel(), 'i', 'toggle') },
+    { icon: 'format_underlined', label: 'Subrayado', hint: 'Ctrl+S', disabled: !rich, run: () => applyRun(sel(), 'u', 'toggle') },
+    { icon: 'format_color_text', label: 'Color de fuente', disabled: !rich, run: () => applyRun(sel(), 'c', S.fontColor) },
+    '-',
+    { icon: 'select_all', label: 'Seleccionar todo', hint: 'Ctrl+A', run: () => { el.focus(); el.setSelectionRange(0, el.value.length); } }
+  ], { x, y });
+}
 
 // ================================================================== ARCHIVO (vista Backstage)
 function backstage() {
@@ -1852,7 +1893,7 @@ function bindUI() {
   // ---- ratón en la cuadrícula
   gc.addEventListener('mousedown', e => {
     if (!G || e.button === 1) return;
-    if (e.target === ed && S.editing) return;
+    if (e.target === ed && S.editing) { if (e.button === 2) e.preventDefault(); return; } // el clic derecho no deshace la selección de texto
     const h = hit(e);
     if (e.button === 2) {
       const R = rng();
@@ -1906,6 +1947,7 @@ function bindUI() {
   });
   gc.addEventListener('contextmenu', e => {
     e.preventDefault(); if (!G) return;
+    if (S.editing) return editMenu(e.clientX, e.clientY, U.ed); // editando: el menú trabaja sobre el texto seleccionado
     const h = hit(e);
     if (h.inCol && !h.inRow) return menu([
       { icon: 'view_week', label: 'Insertar columnas', run: insCols }, { icon: 'delete', label: 'Eliminar columnas', run: delCols },
@@ -1970,8 +2012,14 @@ function bindUI() {
   fx.addEventListener('input', fxSize);
   fx.addEventListener('blur', () => { fx.style.height = ''; });
   fx.addEventListener('input', () => { if (!S.editing) startEdit(fx.value, 'edit', 'bar'); S.point = null; ed.value = fx.value; placeEditor(); fnSuggest(fx); schedule(); });
-  ed.addEventListener('copy', e => { if (!S.editing) doCopy(false, e); });
-  ed.addEventListener('cut', e => { if (!S.editing) doCopy(true, e); });
+  // Editando: se copia solo el texto seleccionado (copia nativa) y se olvida la última celda copiada
+  const textCopied = el => { const t = el.value.slice(el.selectionStart, el.selectionEnd); if (t) { S.textClip = t; S.clip = null; schedule(); } };
+  ed.addEventListener('copy', e => { if (!S.editing) doCopy(false, e); else textCopied(ed); });
+  ed.addEventListener('cut', e => { if (!S.editing) doCopy(true, e); else textCopied(ed); });
+  fx.addEventListener('copy', () => textCopied(fx));
+  fx.addEventListener('cut', () => textCopied(fx));
+  fx.addEventListener('mousedown', e => { if (e.button === 2 && S.editing && document.activeElement === fx) e.preventDefault(); });
+  fx.addEventListener('contextmenu', e => { if (S.editing) { e.preventDefault(); editMenu(e.clientX, e.clientY, fx); } });
   ed.addEventListener('paste', e => { if (S.editing) return; e.preventDefault(); doPaste(e.clipboardData.getData('text/plain'), e.clipboardData.getData('text/html')); });
 
   namebox.addEventListener('keydown', e => {
