@@ -110,6 +110,7 @@ export function buildUI(root) {
       <div class="rhdr" id="rhdr"></div>
       <div class="cells" id="cells"></div>
       <div class="ovl" id="ovl"></div>
+      <div id="edbg" class="edbg"></div>
       <textarea id="ed" class="ed idle" spellcheck="false" autocomplete="off"></textarea>
     </div>
   </div>
@@ -135,7 +136,7 @@ export function buildUI(root) {
   const q = id => root.querySelector('#' + id);
   return {
     gw: q('gw'), gc: q('gc'), chdr: q('chdr'), colheads: q('colheads'), corner: q('corner'), rhdr: q('rhdr'),
-    cells: q('cells'), ovl: q('ovl'), ed: q('ed'), fx: q('fx'), namebox: q('namebox'), stabs: q('stabs'),
+    cells: q('cells'), ovl: q('ovl'), ed: q('ed'), edbg: q('edbg'), fx: q('fx'), namebox: q('namebox'), stabs: q('stabs'),
     smode: q('smode'), sinfo: q('sinfo'), stats: q('stats'), zoom: q('zoom'), zoomv: q('zoomv'), file: q('file'),
     toasts: q('toasts'), bookName: q('bookName'), cloud: q('cloud'), users: q('users'), installBtn: q('installBtn'),
     fillBar: q('fillBar'), colorBar: q('colorBar')

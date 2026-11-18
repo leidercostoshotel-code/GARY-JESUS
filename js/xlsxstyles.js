@@ -64,6 +64,11 @@ export function extractStyles(wb) {
     if (!hex) return null;
     return tint(hex, parseFloat(el.getAttribute('tint') || '0'));
   };
+  // Igual que color(), pero a partir del texto de atributos de <color .../> (para los tramos de texto enriquecido)
+  const colorOf = attrs => {
+    const g = n => { const m = new RegExp('\\b' + n + '="([^"]*)"').exec(attrs || ''); return m ? m[1] : null; };
+    return color({ getAttribute: g });
+  };
 
   // ---- styles.xml
   const sd = parse(stylesXml).documentElement;
@@ -140,5 +145,36 @@ export function extractStyles(wb) {
     }
     out[name] = map;
   }
+  Object.defineProperty(out, 'colorOf', { value: colorOf, enumerable: false });
   return out;
+}
+
+// ---------- Texto con formato por partes (<r><rPr>…</rPr><t>…</t></r>)
+const unesc = t => t.replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&apos;/g, "'")
+  .replace(/&#(\d+);/g, (m, n) => String.fromCharCode(+n)).replace(/&#x([0-9a-f]+);/gi, (m, n) => String.fromCharCode(parseInt(n, 16)))
+  .replace(/&amp;/g, '&').replace(/_x([0-9A-Fa-f]{4})_/g, (m, n) => String.fromCharCode(parseInt(n, 16)));
+const flag = (body, tag) => { const m = new RegExp('<' + tag + '(?:\\s+val="([^"]*)")?\\s*/>').exec(body); return m ? !(m[1] === '0' || m[1] === 'false' || m[1] === 'none') : false; };
+// Devuelve [{a, z, c?, b?, i?, u?}] (posiciones dentro del texto) o null si la celda no tiene formato por partes
+export function richRuns(xml, text, cs, colorOf) {
+  if (!xml || xml.indexOf('<r>') < 0 || !colorOf) return null;
+  const runs = []; let pos = 0, all = '', m;
+  const re = /<r>([\s\S]*?)<\/r>/g;
+  while ((m = re.exec(xml))) {
+    const body = m[1], tm = /<t[^>]*>([\s\S]*?)<\/t>/.exec(body), t = tm ? unesc(tm[1]) : '';
+    const a = pos; pos += t.length; all += t;
+    if (!t.length) continue;
+    const rp = /<rPr>([\s\S]*?)<\/rPr>/.exec(body), o = {};
+    if (rp) {
+      for (const k of ['b', 'i', 'u']) { const on = flag(rp[1], k); if (on !== !!cs[k]) o[k] = on ? 1 : 0; }
+      const cm = /<color\s+([^>]*?)\/>/.exec(rp[1]);
+      const hex = cm ? colorOf(cm[1]) : null, rc = hex ? '#' + hex.toLowerCase() : '#000000', cc = cs.c || '#000000';
+      if (rc !== cc) o.c = rc;
+    }
+    if (!Object.keys(o).length) continue;
+    const last = runs[runs.length - 1];
+    if (last && last.z === a && last.k === JSON.stringify(o)) last.z = pos;
+    else runs.push({ a, z: pos, ...o, k: JSON.stringify(o) });
+  }
+  if (all !== text || !runs.length) return null;
+  return runs.map(({ k, ...r }) => r);
 }

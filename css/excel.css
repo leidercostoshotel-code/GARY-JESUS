@@ -266,3 +266,10 @@ button, select, input { font: inherit; color: inherit; }
 .fnsug div .ms { font-size: 15px; color: #7a7574; }
 .fnsug div.on { background: #cfe8d9; }
 .fnsug small { flex-basis: 100%; color: #605e5c; padding-left: 23px; }
+
+/* ---------- formato por partes del texto (texto enriquecido) ---------- */
+.ed, .edbg { overflow-wrap: break-word; word-break: normal; }
+.edbg { position: absolute; z-index: 3; display: none; border: 2px solid var(--sel); padding: 0 calc(3px * var(--z, 1)); margin: 0; overflow: hidden; background: #fff;
+  white-space: pre; line-height: 1.25; box-shadow: 0 2px 8px rgba(0,0,0,.18); font-family: var(--cellfont); pointer-events: none; color: #000; }
+.ed.rich { color: transparent !important; background: transparent !important; box-shadow: none; }
+.ed.rich::selection { background: rgba(33,115,70,.28); color: transparent; }
