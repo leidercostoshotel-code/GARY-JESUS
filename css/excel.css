@@ -273,3 +273,37 @@ button, select, input { font: inherit; color: inherit; }
   white-space: pre; line-height: 1.25; box-shadow: 0 2px 8px rgba(0,0,0,.18); font-family: var(--cellfont); pointer-events: none; color: #000; }
 .ed.rich { color: transparent !important; background: transparent !important; box-shadow: none; }
 .ed.rich::selection { background: rgba(33,115,70,.28); color: transparent; }
+
+/* ---------- paneles inmovilizados ---------- */
+.fz { position: absolute; display: none; overflow: hidden; background: #fff; }
+.fz > div { position: absolute; left: 0; top: 0; }
+.fzo { pointer-events: none; }
+.fzT { border-bottom: 1px solid #7a7a7a; }
+.fzL { border-right: 1px solid #7a7a7a; }
+.fzC { border-right: 1px solid #7a7a7a; border-bottom: 1px solid #7a7a7a; }
+#fzheads .ch, #fzheads .rh { z-index: 1; }
+.corner > i { z-index: 2; }
+/* ---------- celdas combinadas ---------- */
+.c.mg { background: #fff; z-index: 1; overflow: hidden; }
+.gw.nogrid .c.mg { background: #fff; }
+/* ---------- filtros ---------- */
+.fbtn { position: absolute; pointer-events: auto; cursor: pointer; background: #fff; border: 1px solid #ababab; border-radius: 2px; display: flex; align-items: center; justify-content: center; z-index: 3; }
+.fbtn:hover { background: #e6f2ea; border-color: var(--green); }
+.fbtn .ms { font-size: calc(16px * var(--z, 1)); color: #444; }
+.fbtn.on { background: #dff0e6; border-color: var(--green); }
+.fbtn.on .ms { font-size: calc(13px * var(--z, 1)); color: var(--green); }
+.rh.flt { color: #0b5cad; }
+.menu.fmenu { min-width: 270px; max-height: 86vh; }
+.fpanel { display: flex; flex-direction: column; gap: 6px; }
+.fpanel .fsearch { height: 26px; border: 1px solid #8a8886; border-radius: 3px; padding: 0 8px; outline: none; }
+.fpanel .fsearch:focus { border-color: var(--green); }
+.flist { max-height: 230px; overflow-y: auto; border: 1px solid #d0d0d0; padding: 3px 0; }
+.flist label { display: flex; align-items: center; gap: 6px; padding: 2px 8px; cursor: pointer; white-space: nowrap; }
+.flist label:hover { background: #f0f0f0; }
+.flist label span { overflow: hidden; text-overflow: ellipsis; max-width: 300px; }
+.fbtns { display: flex; justify-content: flex-end; gap: 8px; }
+.fbtns button { height: 26px; padding: 0 16px; border-radius: 3px; cursor: pointer; border: 1px solid #8a8886; background: #fff; }
+.fbtns .fok { background: var(--green); color: #fff; border-color: var(--green); }
+.fbtns .fok:disabled { opacity: .5; cursor: default; }
+
+.split.row .rb.sm { flex-direction: row; gap: 4px; padding-bottom: 0; }

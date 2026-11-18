@@ -33,7 +33,8 @@ const RIBBON = {
     group('Alineación',
       col(row(sm('vtop', 'vertical_align_top', 'Alinear arriba') + sm('vmid', 'vertical_align_center', 'Alinear en el medio') + sm('vbot', 'vertical_align_bottom', 'Alinear abajo') +
         '<span class="vsep"></span>' + sm('wrap', 'wrap_text', 'Ajustar texto', 'Ajustar texto')) +
-        row(sm('left', 'format_align_left', 'Alinear a la izquierda') + sm('center', 'format_align_center', 'Centrar') + sm('right', 'format_align_right', 'Alinear a la derecha')))),
+        row(sm('left', 'format_align_left', 'Alinear a la izquierda') + sm('center', 'format_align_center', 'Centrar') + sm('right', 'format_align_right', 'Alinear a la derecha') +
+          '<span class="vsep"></span>' + `<span class="split row">${sm('merge', 'cell_merge', 'Combinar y centrar', 'Combinar y centrar')}<button class="rb dd" data-cmd="mergeMenu" title="Opciones de combinación">${ic('arrow_drop_down')}</button></span>`))),
     group('Número',
       col(row(sel('numfmt', 'w-num', NUMFMT, 'Formato de número')) +
         row(txt('fmtCur', 'S/', 'Formato de moneda (Soles)') + sm('fmtPct', 'percent', 'Estilo porcentual') + txt('fmtNum', '000', 'Estilo millares') +
@@ -57,13 +58,15 @@ const RIBBON = {
     group('Cálculo', big('recalc', 'calculate', 'Calcular ahora'))
   ],
   datos: [
-    group('Ordenar', big('sortAZ', 'north', 'A → Z', 'Ordenar de A a Z') + big('sortZA', 'south', 'Z → A', 'Ordenar de Z a A')),
+    group('Ordenar y filtrar', big('sortAZ', 'north', 'A → Z', 'Ordenar de A a Z') + big('sortZA', 'south', 'Z → A', 'Ordenar de Z a A') +
+      big('filter', 'filter_alt', 'Filtro', 'Activar o quitar el filtro (Ctrl+Mayús+L)') + big('filterClear', 'filter_alt_off', 'Borrar', 'Mostrar todas las filas')),
     group('Obtener datos', big('syncFile', 'sync', 'Actualizar desde Excel', 'Elegir una versión nueva del Excel: solo se actualizan las celdas que cambiaron') + big('import', 'upload_file', 'Importar Excel', 'Agregar las hojas de otro archivo .xlsx como hojas nuevas')),
     group('Exportar', big('exportXlsx', 'download', 'Descargar .xlsx') + big('exportCsv', 'csv', 'Descargar CSV'))
   ],
   vista: [
     group('Zoom', big('zoomIn', 'zoom_in', 'Acercar') + big('zoomOut', 'zoom_out', 'Alejar') + big('zoom100', 'fit_screen', '100%')),
     group('Mostrar', big('grid', 'grid_on', 'Cuadrícula', 'Mostrar u ocultar líneas de cuadrícula')),
+    group('Paneles', big('freezeMenu', 'ac_unit', 'Inmovilizar', 'Inmovilizar paneles: deja fijas filas y columnas al desplazarte')),
     group('Ventana', big('fullscreen', 'fullscreen', 'Pantalla completa') + big('install', 'install_desktop', 'Instalar app', 'Instalar en esta computadora'))
   ]
 };
@@ -106,8 +109,12 @@ export function buildUI(root) {
   </div>
   <div class="gw" id="gw">
     <div class="gc" id="gc">
-      <div class="chdr" id="chdr"><div class="corner" id="corner"><i></i></div><div id="colheads"></div></div>
-      <div class="rhdr" id="rhdr"></div>
+      <div class="chdr" id="chdr">
+        <div id="colheads"></div>
+        <div class="fz fzT" id="fzT"><div id="fzTc"></div><div class="fzo" id="fzTo"></div></div>
+        <div class="corner" id="corner"><i></i><div id="fzheads"></div><div class="fz fzC" id="fzC"><div id="fzCc"></div><div class="fzo" id="fzCo"></div></div></div>
+      </div>
+      <div class="rhdr" id="rhdr"><div id="rowheads"></div><div class="fz fzL" id="fzL"><div id="fzLc"></div><div class="fzo" id="fzLo"></div></div></div>
       <div class="cells" id="cells"></div>
       <div class="ovl" id="ovl"></div>
       <div id="edbg" class="edbg"></div>
@@ -122,6 +129,7 @@ export function buildUI(root) {
   </footer>
   <div class="status">
     <span id="smode">Listo</span>
+    <span id="sfilt" class="sinfo"></span>
     <span id="sinfo" class="sinfo"></span>
     <span class="grow"></span>
     <span id="stats" class="stats"></span>
@@ -136,6 +144,8 @@ export function buildUI(root) {
   const q = id => root.querySelector('#' + id);
   return {
     gw: q('gw'), gc: q('gc'), chdr: q('chdr'), colheads: q('colheads'), corner: q('corner'), rhdr: q('rhdr'),
+    rowheads: q('rowheads'), fzheads: q('fzheads'), fzT: q('fzT'), fzTc: q('fzTc'), fzTo: q('fzTo'), fzL: q('fzL'), fzLc: q('fzLc'), fzLo: q('fzLo'),
+    fzC: q('fzC'), fzCc: q('fzCc'), fzCo: q('fzCo'), sfilt: q('sfilt'),
     cells: q('cells'), ovl: q('ovl'), ed: q('ed'), edbg: q('edbg'), fx: q('fx'), namebox: q('namebox'), stabs: q('stabs'),
     smode: q('smode'), sinfo: q('sinfo'), stats: q('stats'), zoom: q('zoom'), zoomv: q('zoomv'), file: q('file'),
     toasts: q('toasts'), bookName: q('bookName'), cloud: q('cloud'), users: q('users'), installBtn: q('installBtn'),
