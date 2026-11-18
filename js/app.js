@@ -7,7 +7,7 @@ import {
   formulaRefs, toEnglish, FUNCTION_LIST, ALIAS, FErr, compareValues, todaySerial, nowSerial, tokenize, fmtGeneral
 } from './formulas.js';
 import { buildUI, menu, closeMenu, dialog, FONTS, SIZES } from './ui.js';
-import { extractStyles } from './xlsxstyles.js';
+import { extractStyles, richRuns } from './xlsxstyles.js';
 
 const DEF_W = 64, DEF_H = 20, HDR_H = 20, MIN_ROWS = 1000, MIN_COLS = 52;
 const BASE_PT = 11;
@@ -50,6 +50,7 @@ function onLoaded(sid) {
   calc.reset(); dataDirty = true; extents.delete(sid);
   if (sid === S.sid) { geomDirty = true; if (!S.editing) { U.smode.textContent = 'Listo'; scheduleFormulaBar(); } }
   schedule();
+  maybeRich(sid);
 }
 async function loadAll(why) {
   const pend = sortedSheets().map(([sid]) => sid).filter(sid => !loaded.has(sid));
@@ -161,7 +162,7 @@ async function init() {
   }
   try {
     store = await createStore(S.book, {
-      onMeta: m => { S.tree.meta = m || {}; S.metaLoaded = true; updateTitle(); maybeUpgrade(); },
+      onMeta: m => { S.tree.meta = m || {}; S.metaLoaded = true; updateTitle(); maybeUpgrade(); if (S.sid) maybeRich(S.sid); },
       onSheet: (sid, v) => {
         const prevName = S.tree.hojas[sid]?.nombre;
         if (v) S.tree.hojas[sid] = v; else { delete S.tree.hojas[sid]; delete S.tree.celdas[sid]; extents.delete(sid); loaded.delete(sid); loadReq.delete(sid); }
@@ -249,6 +250,96 @@ function savePos(now) {
     lsSet(`xw-pos:${S.book}:${S.sid}`, JSON.stringify({ ...S.sel, t: Math.round(U.gw.scrollTop / S.z), l: Math.round(U.gw.scrollLeft / S.z) }));
   };
   if (now) go(); else posT = setTimeout(go, 400);
+}
+
+// ================================================================== TEXTO CON FORMATO POR PARTES
+// s.rt = [{a, z, c?, b?, i?, u?}] : tramos [a, z) del texto con color/negrita/cursiva/subrayado propios
+const safeCol = c => (typeof c === 'string' && /^#[0-9a-fA-F]{3,8}$/.test(c) ? c : '');
+function runsOf(s) {
+  const a = s && s.rt; if (!a) return [];
+  return (Array.isArray(a) ? a : Object.values(a)).filter(r => r && r.z > r.a && r.a >= 0).sort((x, y) => x.a - y.a);
+}
+function richHtml(text, runs) {
+  let h = '', p = 0;
+  for (const r of runs) {
+    if (r.a >= text.length) break;
+    const z = Math.min(r.z, text.length);
+    if (r.a < p) continue;
+    if (r.a > p) h += esc(text.slice(p, r.a));
+    let st = '';
+    if (r.c && safeCol(r.c)) st += `color:${r.c};`;
+    if (r.b != null) st += `font-weight:${r.b ? 700 : 400};`;
+    if (r.i != null) st += `font-style:${r.i ? 'italic' : 'normal'};`;
+    if (r.u) st += 'text-decoration:underline;';
+    h += `<span style="${st}">${esc(text.slice(r.a, z))}</span>`; p = z;
+  }
+  return h + esc(text.slice(p));
+}
+const noRt = s => { if (!s || !s.rt) return s; const o = { ...s }; delete o.rt; return o; };
+// Al dar formato a toda la celda, ese atributo deja de estar definido por partes (como Excel)
+function stripRunProp(s, prop) {
+  if (!s.rt) return s;
+  const rt = runsOf(s).map(r => { const o = { ...r }; delete o[prop]; return o; }).filter(r => Object.keys(r).length > 2);
+  const o = { ...s }; if (rt.length) o.rt = rt; else delete o.rt; return o;
+}
+// El texto cambió en [p, p+del) por ins caracteres: mueve los tramos (lo escrito hereda el formato del carácter anterior)
+function shiftRuns(runs, p, del, ins) {
+  const d = ins - del, end = p + del, out = [];
+  for (const r of runs) {
+    let a, z;
+    if (r.a < p) a = r.a; else if (r.a < end || (r.a === p && p === 0)) a = p === 0 ? 0 : p + ins; else a = r.a + d;
+    if (r.z < p) z = r.z; else if (r.z === p) z = p > 0 && r.a < p ? p + ins : p; else if (r.z < end) z = r.a < p || p === 0 ? p + ins : p; else z = r.z + d;
+    if (z > a) out.push({ ...r, a, z });
+  }
+  return out;
+}
+function syncRuns() {
+  const e = S.editing; if (!e) return;
+  const now = U.ed.value, old = e.prev;
+  if (now === old) return;
+  e.prev = now;
+  if (!e.rt.length) return;
+  if (now[0] === '=') { e.rt = []; return; }
+  const m = Math.min(old.length, now.length);
+  let p = 0; while (p < m && old[p] === now[p]) p++;
+  let q = 0; while (q < m - p && old[old.length - 1 - q] === now[now.length - 1 - q]) q++;
+  e.rt = shiftRuns(e.rt, p, old.length - p - q, now.length - p - q);
+}
+// Selección de texto dentro de la celda que se está editando (no fórmulas)
+function richSel() {
+  if (!S.editing) return null;
+  const el = document.activeElement === U.fx ? U.fx : U.ed;
+  if (el.value[0] === '=') return null;
+  const a = el.selectionStart, z = el.selectionEnd;
+  return z > a ? { a, z } : null;
+}
+// Aplica color / negrita / cursiva / subrayado solo a la parte seleccionada
+function applyRun(sel, prop, val) {
+  syncRuns();
+  const e = S.editing, text = U.ed.value, base = cellAt(e.r, e.c, e.sid)?.s || {};
+  const at = Array.from({ length: text.length }, () => null);
+  for (const r of e.rt) { const o = { ...r }; delete o.a; delete o.z; for (let i = r.a; i < Math.min(r.z, text.length); i++) at[i] = o; }
+  const a = Math.max(0, sel.a), z = Math.min(text.length, sel.z);
+  if (val === 'toggle') {
+    let all = true;
+    for (let i = a; i < z; i++) { const r = at[i]; if (!(r && r[prop] != null ? r[prop] : base[prop])) { all = false; break; } }
+    val = all ? 0 : 1;
+  }
+  for (let i = a; i < z; i++) {
+    const o = { ...(at[i] || {}) };
+    if (prop === 'c') { const want = val || '#000000', def = base.c || '#000000'; if (want.toLowerCase() === def.toLowerCase()) delete o.c; else o.c = want; }
+    else if (!!val === !!base[prop]) delete o[prop]; else o[prop] = val ? 1 : 0;
+    at[i] = Object.keys(o).length ? o : null;
+  }
+  const runs = []; let lastK = null;
+  for (let i = 0; i < text.length; i++) {
+    const k = at[i] ? JSON.stringify(at[i]) : null;
+    if (k && k === lastK) runs[runs.length - 1].z = i + 1; else if (k) runs.push({ a: i, z: i + 1, ...at[i] });
+    lastK = k;
+  }
+  e.rt = runs; e.rtTouched = true;
+  U.ed.setSelectionRange(sel.a, sel.z); U.fx.setSelectionRange(sel.a, sel.z);
+  placeEditor(); schedule();
 }
 
 // ================================================================== GEOMETRÍA
@@ -341,9 +432,10 @@ function renderCells(r0, r1, c0, c1) {
       if (s.b) st += 'font-weight:700;';
       if (s.i) st += 'font-style:italic;';
       if (s.u) st += 'text-decoration:underline;';
-      if (s.c) st += `color:${s.c};`;
+      const sc = safeCol(s.c), sf = safeCol(s.f);
+      if (sc) st += `color:${sc};`;
       if (d.err) st += 'color:#c00000;';
-      if (s.f) st += `background:${s.f};border-color:${s.f === '#ffffff' ? '' : s.f};`;
+      if (sf) st += `background:${sf};border-color:${sf === '#ffffff' ? '' : sf};`;
       const ba = s.bd === 'a', bt = s.bt || (ba ? 1 : 0), bb = s.bb || (ba || s.bd === 'b' ? 1 : 0), bl = s.bl || (ba ? 1 : 0), br = s.br || (ba ? 1 : 0);
       if (br) st += `border-right:${br}px solid #000;`;
       if (bb) st += `border-bottom:${bb}px solid #000;`;
@@ -355,7 +447,8 @@ function renderCells(r0, r1, c0, c1) {
       let cls = 'c' + extra + cov;
       if (s.w) cls += ' wr';
       if (s.nt) cls += ' nt';
-      out.push(`<div class="${cls}" style="${st}"${s.nt ? ` title="${esc(s.nt)}"` : ''}>${esc(d.t)}</div>`);
+      const rich = s.rt && typeof v === 'string' && !S.showF && cell.v[0] !== "'";
+      out.push(`<div class="${cls}" style="${st}"${s.nt ? ` title="${esc(s.nt)}"` : ''}>${rich ? `<span>${richHtml(d.t, runsOf(s))}</span>` : esc(d.t)}</div>`);
     }
   }
   U.cells.innerHTML = out.join('');
@@ -478,6 +571,7 @@ function placeEditor() {
   const ed = U.ed, k = cellRect(S.sel.ar, S.sel.ac);
   ed.style.left = k.x + 'px'; ed.style.top = k.y + 'px';
   if (!S.editing) { ed.style.width = k.w + 'px'; ed.style.height = k.h + 'px'; return; }
+  syncRuns();
   const s = cellAt(S.editing.r, S.editing.c)?.s || {};
   // El editor se ve igual que la celda: color, relleno, cursiva, subrayado, alineación y ajuste de texto
   ed.style.font = fontCss(s, S.z);
@@ -491,12 +585,23 @@ function placeEditor() {
   ed.style.width = '0px'; ed.style.height = '0px';
   ed.style.width = (s.w ? k.w + 1 : Math.min(Math.max(k.w + 1, ed.scrollWidth + 8), 900)) + 'px';
   ed.style.height = Math.max(k.h + 1, ed.scrollHeight + 2) + 'px';
+  // Con formato por partes: el texto se dibuja en una capa detrás y el cuadro de texto queda transparente encima
+  const rich = S.editing.rt.length > 0 && ed.value[0] !== '=', bg = U.edbg;
+  ed.classList.toggle('rich', rich);
+  bg.style.display = rich ? 'block' : 'none';
+  if (rich) {
+    for (const p of ['left', 'top', 'width', 'height', 'font', 'fontWeight', 'textAlign', 'whiteSpace', 'textDecoration']) bg.style[p] = ed.style[p];
+    bg.style.color = safeCol(s.c) || '#000'; bg.style.background = safeCol(s.f) || '#fff';
+    ed.style.caretColor = safeCol(s.c) || '#000';
+    bg.innerHTML = richHtml(ed.value, S.editing.rt) + '\u200b';
+  } else ed.style.caretColor = '';
 }
 function startEdit(text, mode = 'enter', src = 'cell') {
   if (S.editing) return;
   const { ar: r, ac: c } = S.sel;
   const raw = cellAt(r, c)?.v ?? '';
-  S.editing = { sid: S.sid, r, c, mode, orig: raw };
+  const rt0 = text == null && raw[0] !== '=' && raw[0] !== "'" ? clone(runsOf(cellAt(r, c)?.s)) : [];
+  S.editing = { sid: S.sid, r, c, mode, orig: raw, rt: rt0, prev: text == null ? raw : text };
   const ed = U.ed;
   ed.classList.remove('idle');
   ed.value = text == null ? raw : text;
@@ -508,16 +613,18 @@ function startEdit(text, mode = 'enter', src = 'cell') {
 }
 function stopEdit() {
   S.editing = null; S.point = null; hideSug(); acCache = null;
-  for (const p of ['color', 'background', 'textDecoration', 'textAlign', 'whiteSpace']) U.ed.style[p] = '';
+  for (const p of ['color', 'background', 'textDecoration', 'textAlign', 'whiteSpace', 'caretColor']) U.ed.style[p] = '';
+  U.ed.classList.remove('rich'); U.edbg.style.display = 'none'; S.richSel = null;
   U.ed.classList.add('idle'); U.ed.value = ''; U.ed.style.width = ''; U.ed.style.height = '';
   U.ed.style.minWidth = ''; U.ed.style.minHeight = '';
   U.smode.textContent = 'Listo';
 }
 function commit(dr = 0, dc = 0) {
   const e = S.editing; if (!e) return;
+  syncRuns();
   const val = U.ed.value;
   stopEdit();
-  if (val !== e.orig) setInput(e.sid, e.r, e.c, val);
+  if (val !== e.orig || e.rtTouched) setInput(e.sid, e.r, e.c, val, e.rt);
   if (e.sid !== S.sid) switchSheet(e.sid);
   if (dr || dc) move(dr, dc); else onSel();
   U.ed.focus({ preventScroll: true });
@@ -557,9 +664,11 @@ function cellObj(v, s) {
   if (hasS) o.s = st;
   return o;
 }
-function setInput(sid, r, c, text) {
+function setInput(sid, r, c, text, rt = null) {
   const old = cellsOf(sid)[keyOf(r, c)];
   const { v, s } = normalizeInput(text, old?.s);
+  delete s.rt;
+  if (rt && rt.length && v === text && v[0] !== '=' && v[0] !== "'") s.rt = rt;
   write({ [`celdas/${sid}/${keyOf(r, c)}`]: cellObj(v, s) });
 }
 
@@ -627,7 +736,7 @@ function clearSel(what) {
   const R = boundedSel(), cells = cellsOf(S.sid), upd = {};
   for (let r = R.r1; r <= R.r2; r++) for (let c = R.c1; c <= R.c2; c++) {
     const k = keyOf(r, c), old = cells[k]; if (!old) continue;
-    upd[`celdas/${S.sid}/${k}`] = what === 'all' ? null : what === 'fmt' ? cellObj(old.v, {}) : cellObj('', old.s);
+    upd[`celdas/${S.sid}/${k}`] = what === 'all' ? null : what === 'fmt' ? cellObj(old.v, {}) : cellObj('', noRt(old.s));
   }
   if (Object.keys(upd).length) write(upd);
 }
@@ -725,10 +834,10 @@ function doPaste(text, html, mode = 'all') {
       const k = keyOf(r, c), old = cells[k];
       let v = src?.v, s = src?.s;
       if (v && !move && v[0] === '=') v = T ? transposeFormula(v, sr, sc, r, c) : shiftFormula(v, r - sr, c - sc);
-      if (mode === 'values') { v = valueRaw(calc.value(clip.sid, sr, sc)); s = old?.s; }
-      else if (mode === 'formulas') s = old?.s;
-      else if (mode === 'formats') { v = old?.v; s = src?.s; }
-      else if (mode === 'link') { v = '=' + (clip.sid !== S.sid ? quoteSheet(srcSheet) + '!' : '') + keyOf(sr, sc); s = old?.s; }
+      if (mode === 'values') { v = valueRaw(calc.value(clip.sid, sr, sc)); s = noRt(old?.s); }
+      else if (mode === 'formulas') s = noRt(old?.s);
+      else if (mode === 'formats') { v = old?.v; s = noRt(src?.s); }
+      else if (mode === 'link') { v = '=' + (clip.sid !== S.sid ? quoteSheet(srcSheet) + '!' : '') + keyOf(sr, sc); s = noRt(old?.s); }
       const o = cellObj(v, s);
       upd[`celdas/${S.sid}/${k}`] = o;
       if (mode !== 'all' && !src && old) upd[`celdas/${S.sid}/${k}`] = mode === 'formats' ? cellObj(old.v, null) : cellObj(v, old.s);
@@ -746,7 +855,7 @@ function doPaste(text, html, mode = 'all') {
   rows.forEach((row, i) => row.forEach((x, j) => {
     const k = keyOf(R.r1 + i, R.c1 + j), old = cells[k];
     const clean = String(x.t ?? '').replace(/\u00a0/g, ' ').replace(/\r/g, '').trim();
-    const { v, s } = normalizeInput(clean, old?.s);
+    const { v, s } = normalizeInput(clean, noRt(old?.s));
     if (x.b && mode === 'all') s.b = 1;
     if (clean.includes('\n')) s.w = 1;
     upd[`celdas/${S.sid}/${k}`] = cellObj(v, s);
@@ -1064,7 +1173,7 @@ async function seedBook(lb) {
   } finally { box.remove(); }
 }
 // Convierte una hoja del .xlsx en celdas {v, s} con su formato original (bordes, letra, relleno…)
-function sheetCells(X, ws, fmt) {
+function sheetCells(X, ws, fmt, colorOf) {
   const cells = {};
   let mr = -1, mc = -1;
   for (const addr of Object.keys(ws)) {
@@ -1090,6 +1199,7 @@ function sheetCells(X, ws, fmt) {
     if (x.t === 's' && /^\d/.test(v) && !isNaN(+v)) v = "'" + v;
     if (!s.f) { const fg = x.s && x.s.patternType === 'solid' && x.s.fgColor && x.s.fgColor.rgb; if (fg && fg !== 'FFFFFF' && /^[0-9A-F]{6,8}$/i.test(fg)) s.f = '#' + fg.slice(-6).toLowerCase(); }
     if (typeof v === 'string' && v.includes('\n')) s.w = 1;
+    if (x.t === 's' && x.r && v && v[0] !== "'" && colorOf) { const rt = richRuns(x.r, v, s, colorOf); if (rt) s.rt = rt; }
     // celdas vacías solo con formato: se guardan si están cerca de los datos (evita miles de celdas inútiles)
     if ((v == null || v === '') && (p.r > mr + 3 || p.c > mc + 2 || !(s.f || s.bd || s.bt || s.bb || s.bl || s.br))) continue;
     const o = cellObj(v, s); if (o) cells[keyOf(p.r, p.c)] = o;
@@ -1120,9 +1230,9 @@ async function upgradeStyles(lb) {
       idx++;
       const sid = 's' + String(idx).padStart(3, '0');
       if (!S.tree.hojas[sid] || !wb.Sheets[name]) continue;
-      const { cells, anchos, altos } = sheetCells(X, wb.Sheets[name], fmt[name]);
+      const { cells, anchos, altos } = sheetCells(X, wb.Sheets[name], fmt[name], fmt.colorOf);
       const upd = {};
-      for (const [k, o] of Object.entries(cells)) if (o.s) upd[`celdas/${sid}/${k}/s`] = o.s;
+      for (const [k, o] of Object.entries(cells)) if (o.s) upd[`celdas/${sid}/${k}/s`] = noRt(o.s);
       upd[`hojas/${sid}/anchos`] = Object.keys(anchos).length ? anchos : null;
       upd[`hojas/${sid}/altos`] = Object.keys(altos).length ? altos : null;
       await write(upd, false);
@@ -1144,12 +1254,39 @@ async function maybeUpgrade() {
   } catch (e) { console.warn(e); U.sinfo.textContent = ''; }
 }
 
+// Libros cargados antes de existir el formato por partes: al abrir cada hoja se traen del Excel los colores
+// parciales de las celdas cuyo texto sigue igual. Se hace una sola vez por hoja (hojas/{id}/rtv).
+let richWb = null; const richBusy = new Set();
+async function maybeRich(sid) {
+  const lb = libroById(S.book), h = S.tree.hojas[sid];
+  if (!lb || !h || h.rtv || richBusy.has(sid) || !loaded.has(sid) || !S.tree.meta.importado || !(h.origen || /^s\d{3}$/.test(sid))) return;
+  richBusy.add(sid);
+  try {
+    if (!richWb) richWb = (async () => { const X = await loadXLSX(); const r = await fetch(encodeURI(lb.archivo), { cache: 'no-cache' }); if (!r.ok) throw new Error('sin archivo'); return { X, ...readWorkbook(X, await r.arrayBuffer()) }; })();
+    const { X, wb, fmt } = await richWb;
+    const name = h.origen || wb.SheetNames[+sid.slice(1) - 1], ws = wb.Sheets[name];
+    const upd = { [`hojas/${sid}/rtv`]: 1 }; let n = 0;
+    if (ws) {
+      const { cells } = sheetCells(X, ws, fmt[name], fmt.colorOf), cur0 = cellsOf(sid);
+      for (const [k, o] of Object.entries(cells)) {
+        if (!o.s || !o.s.rt) continue;
+        const c = cur0[k];
+        if (c && c.v === o.v && !(c.s && c.s.rt)) { upd[`celdas/${sid}/${k}/s/rt`] = o.s.rt; n++; }
+      }
+    }
+    if (S.tree.hojas[sid] && !S.tree.hojas[sid].rtv) await write(upd, false);
+  } catch (e) { richWb = null; console.warn('Formato por partes no disponible', e); }
+  richBusy.delete(sid);
+}
+
 // ---------- huellas: permiten actualizar solo lo que cambió
 function fnv(str) { let h = 0x811c9dc5; for (let i = 0; i < str.length; i++) { h ^= str.charCodeAt(i); h = Math.imul(h, 0x01000193); } return (h >>> 0).toString(36); }
 function fileId(buf) { const u = new Uint8Array(buf); let h = 0x811c9dc5; for (let i = 0; i < u.length; i++) { h ^= u[i]; h = Math.imul(h, 0x01000193); } return (h >>> 0).toString(36) + u.length.toString(36); }
 function fingerprint(cells, anchos, altos) {
   const hashes = {}; let acc = '';
-  for (const k of Object.keys(cells).sort()) { const h = fnv(JSON.stringify(cells[k])); hashes[k] = h; acc += k + h; }
+  // la huella no incluye el formato por partes (s.rt): así sigue siendo compatible con los libros ya cargados
+  const plain = c => (c.s && c.s.rt ? { ...c, s: noRt(c.s) } : c);
+  for (const k of Object.keys(cells).sort()) { const h = fnv(JSON.stringify(plain(cells[k]))); hashes[k] = h; acc += k + h; }
   const dims = fnv(JSON.stringify([anchos, altos]));
   return { hashes, dims, huella: fnv(acc + '|' + dims) + Object.keys(hashes).length.toString(36) };
 }
@@ -1189,14 +1326,14 @@ async function syncBook(buf, lb) {
       idx++;
       const ws = wb.Sheets[name]; if (!ws) continue;
       U.sinfo.textContent = `Revisando el Excel: hoja ${idx} de ${wb.SheetNames.length}…`;
-      const { cells, anchos, altos } = sheetCells(X, ws, fmt[name]);
+      const { cells, anchos, altos } = sheetCells(X, ws, fmt[name], fmt.colorOf);
       const fp = fingerprint(cells, anchos, altos);
       const ln = name.toLowerCase(), list = sortedSheets();
       const hit = list.find(([, h]) => (h.origen || '').toLowerCase() === ln) || list.find(([, h]) => !h.origen && (h.nombre || '').toLowerCase() === ln);
       if (!hit) {
         if (borradas[fnv(ln)]) continue; // la borraron en la página: no se vuelve a crear
         const sid = 'x' + fnv(ln), orden = prevOrden + 0.001;
-        const meta = { nombre: uniqueName(name), orden, origen: name, huella: fp.huella, dims: fp.dims };
+        const meta = { nombre: uniqueName(name), orden, origen: name, huella: fp.huella, dims: fp.dims, rtv: 1 };
         if (orNull(anchos)) meta.anchos = anchos; if (orNull(altos)) meta.altos = altos;
         S.tree.hojas[sid] = meta;
         await write({ ['hojas/' + sid]: meta, ['celdas/' + sid]: orNull(cells), ['bases/' + sid]: orNull(fp.hashes) }, false);
@@ -1208,7 +1345,7 @@ async function syncBook(buf, lb) {
       let base = await store.read('bases/' + sid), baseDims = h.dims;
       if (!base) {
         const bw = await getBase(), bws = bw && bw.wb.Sheets[name];
-        if (bws) { const b = sheetCells(X, bws, bw.fmt[name]), bf = fingerprint(b.cells, b.anchos, b.altos); base = bf.hashes; baseDims = bf.dims; }
+        if (bws) { const b = sheetCells(X, bws, bw.fmt[name], bw.fmt.colorOf), bf = fingerprint(b.cells, b.anchos, b.altos); base = bf.hashes; baseDims = bf.dims; }
         else base = {};
       }
       const upd = {}; let n = 0;
@@ -1235,13 +1372,13 @@ async function importBuffer(buf, seed, progress) {
   for (const name of wb.SheetNames) {
     idx++; if (progress) progress(idx, wb.SheetNames.length);
     const ws = wb.Sheets[name]; if (!ws) continue;
-    const { cells, anchos, altos } = sheetCells(X, ws, fmt[name]);
+    const { cells, anchos, altos } = sheetCells(X, ws, fmt[name], fmt.colorOf);
     const sid = seed ? 's' + String(idx).padStart(3, '0') : newSid();
     const meta = { nombre: seed ? name : uniqueName(name), orden: order++ };
     if (Object.keys(anchos).length) meta.anchos = anchos;
     if (Object.keys(altos).length) meta.altos = altos;
     const upd = { ['hojas/' + sid]: meta, ['celdas/' + sid]: Object.keys(cells).length ? cells : null };
-    if (seed) { const fp = fingerprint(cells, anchos, altos); Object.assign(meta, { origen: name, huella: fp.huella, dims: fp.dims }); upd['bases/' + sid] = Object.keys(fp.hashes).length ? fp.hashes : null; }
+    if (seed) { const fp = fingerprint(cells, anchos, altos); Object.assign(meta, { origen: name, huella: fp.huella, dims: fp.dims, rtv: 1 }); upd['bases/' + sid] = Object.keys(fp.hashes).length ? fp.hashes : null; }
     S.tree.hojas[sid] = meta; // reserva el nombre para la siguiente hoja
     await write(upd, false);
     total += Object.keys(cells).length;
@@ -1348,13 +1485,14 @@ function autoFn(fn) {
 function colorMenu(at, kind) {
   const cells = STD_COLORS.map(c => `<button class="sw" data-c="${c}" style="background:${c}" title="${c}"></button>`).join('');
   const m = menu([{ html: `<div class="swatches">${cells}</div>` }, '-',
-    { icon: kind === 'fill' ? 'format_color_reset' : 'format_color_text', label: kind === 'fill' ? 'Sin relleno' : 'Automático', run: () => styleSel(s => ({ ...s, [kind === 'fill' ? 'f' : 'c']: undefined })) },
+    { icon: kind === 'fill' ? 'format_color_reset' : 'format_color_text', label: kind === 'fill' ? 'Sin relleno' : 'Automático', run: () => kind !== 'fill' && S.editing && S.richSel ? applyRun(S.richSel, 'c', null) : styleSel(s => stripRunProp({ ...s, [kind === 'fill' ? 'f' : 'c']: undefined }, kind === 'fill' ? 'f' : 'c')) },
     { icon: 'palette', label: 'Más colores…', run: () => { const i = document.createElement('input'); i.type = 'color'; i.value = kind === 'fill' ? S.fillColor : S.fontColor; i.oninput = () => applyColor(kind, i.value); i.click(); } }], at);
   m.querySelectorAll('.sw').forEach(b => b.addEventListener('click', () => { closeMenu(); applyColor(kind, b.dataset.c); focusGrid(); }));
 }
 function applyColor(kind, col) {
   if (kind === 'fill') { S.fillColor = col; U.fillBar.style.background = col; styleSel(s => ({ ...s, f: col })); }
-  else { S.fontColor = col; U.colorBar.style.background = col; styleSel(s => ({ ...s, c: col })); }
+  else if (S.editing && S.richSel) { S.fontColor = col; U.colorBar.style.background = col; applyRun(S.richSel, 'c', col); }
+  else { S.fontColor = col; U.colorBar.style.background = col; styleSel(s => stripRunProp({ ...s, c: col }, 'c')); }
 }
 const PASTE_OPTS = [
   ['all', '', 'Pegar (P)'], ['values', '123', 'Valores (V)'], ['formulas', 'fx', 'Fórmulas (F)'],
@@ -1507,7 +1645,7 @@ function backstage() {
 }
 
 // ================================================================== COMANDOS
-const toggle = k => styleSel(s => ({ ...s, [k]: activeStyle()[k] ? undefined : 1 }));
+const toggle = k => { const on = activeStyle()[k] ? undefined : 1; styleSel(s => stripRunProp({ ...s, [k]: on }, k)); };
 const setA = (k, v) => styleSel(s => ({ ...s, [k]: activeStyle()[k] === v ? undefined : v }));
 function decimals(d) {
   const s = activeStyle(), v = calc.value(S.sid, S.sel.ar, S.sel.ac);
@@ -1530,7 +1668,7 @@ const CMD = {
   save: () => toast(store?.mode === 'firebase' ? 'Todo se guarda automáticamente en la nube ☁' : 'Todo se guarda automáticamente en este navegador'),
   paste: pasteFromButton, cut: () => doCopy(true), copy: () => doCopy(false),
   pasteMenu: at => menu([{ title: 'Opciones de pegado:', icon: 'content_paste' }, { html: pasteIconsHtml(), bind: bindPaste }, '-', { icon: '', label: 'Pegado especial…', hint: 'Ctrl+Alt+V', sub: pasteSpecialItems }], at),
-  painter: () => { S.painter = { ...activeStyle() }; U.gw.classList.add('painting'); toast('Selecciona las celdas donde copiar el formato'); },
+  painter: () => { S.painter = { ...noRt(activeStyle()) }; U.gw.classList.add('painting'); toast('Selecciona las celdas donde copiar el formato'); },
   bold: () => toggle('b'), italic: () => toggle('i'), underline: () => toggle('u'),
   font: v => styleSel(s => ({ ...s, ff: v === 'Aptos Narrow' ? undefined : v })),
   size: v => styleSel(s => ({ ...s, fs: +v === BASE_PT ? undefined : +v })),
@@ -1579,8 +1717,8 @@ const CMD = {
     { icon: 'south', label: 'Ordenar de Z a A', run: () => sortSel(true) }], at),
   sortAZ: () => sortSel(false), sortZA: () => sortSel(true),
   find, insRows, insCols, addSheet: () => addSheet(), template: insertTemplate,
-  today: () => { const k = keyOf(S.sel.ar, S.sel.ac); write({ [`celdas/${S.sid}/${k}`]: cellObj(String(todaySerial()), { ...activeStyle(), nf: 'date' }) }); },
-  now: () => { const k = keyOf(S.sel.ar, S.sel.ac); write({ [`celdas/${S.sid}/${k}`]: cellObj(String(nowSerial() % 1), { ...activeStyle(), nf: 'time' }) }); },
+  today: () => { const k = keyOf(S.sel.ar, S.sel.ac); write({ [`celdas/${S.sid}/${k}`]: cellObj(String(todaySerial()), { ...noRt(activeStyle()), nf: 'date' }) }); },
+  now: () => { const k = keyOf(S.sel.ar, S.sel.ac); write({ [`celdas/${S.sid}/${k}`]: cellObj(String(nowSerial() % 1), { ...noRt(activeStyle()), nf: 'time' }) }); },
   fnMenu: at => fnMenu(at),
   showFormulas: () => { S.showF = !S.showF; dataDirty = true; schedule(); refreshRibbon(); },
   recalc: () => { calc.reset(); dataDirty = true; schedule(); toast('Recalculado'); },
@@ -1620,6 +1758,13 @@ function runCmd(name, arg, el) {
   const f = CMD[name]; if (!f) return;
   const keepsEdit = ['fnMenu', 'cancelEdit', 'commitEdit'].includes(name);
   if (name === 'home' || name === 'openBook') { if (S.editing) commit(0, 0); return f(); }
+  if (S.editing) { // con una parte del texto seleccionada, el formato va solo a esa parte
+    const sel = richSel(), prop = { bold: 'b', italic: 'i', underline: 'u' }[name];
+    S.richSel = null;
+    if (sel && prop) return applyRun(sel, prop, 'toggle');
+    if (sel && name === 'color') return applyRun(sel, 'c', S.fontColor);
+    if (sel && name === 'colorMenu') { S.richSel = sel; return f(el || arg); }
+  }
   if (S.editing && !keepsEdit) commit(0, 0);
   f(el || arg);
   if (!/Menu$/.test(name) && !['find', 'newBook', 'openBook', 'myName', 'install', 'share'].includes(name)) focusGrid();
@@ -1865,6 +2010,10 @@ function onKey(e, src) {
       if (k === 'Escape') { e.preventDefault(); hideSug(); return; }
     }
     if (k === 'F4') { e.preventDefault(); toggleAbs(src === 'bar' ? U.fx : U.ed); return; }
+    if (ctrl && !e.altKey) {
+      const prop = { b: 'b', n: 'b', i: 'i', k: 'i', u: 'u', s: 'u' }[k.toLowerCase()], sel = prop && richSel();
+      if (sel) { e.preventDefault(); applyRun(sel, prop, 'toggle'); return; }
+    }
     if (k === 'Enter' && e.altKey && src === 'cell') { e.preventDefault(); insertAtCaret('\n'); return; }
     if (k === 'Enter' && e.altKey && src === 'bar') {
       e.preventDefault(); const f = U.fx, p0 = f.selectionStart;
