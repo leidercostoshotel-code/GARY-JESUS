@@ -16,6 +16,7 @@ y el nombre de las demás). Cada cambio se guarda solo, al instante.
 | Formato | Negrita, cursiva, subrayado, fuente, tamaño, colores de relleno y de fuente, bordes, alineación, ajustar texto, formatos de número (S/, $, %, fecha, millares, decimales), copiar formato |
 | Fórmulas | `SUMA`, `PROMEDIO`, `CONTAR`, `SI`, `SI.ERROR`, `SUMAR.SI`, `CONTAR.SI`, `BUSCARV`, `EXTRAE`, `REDONDEAR`, `HOY`… en español **o** inglés, con `;` o `,`. Referencias a otras hojas (`'02 de enero'!H17`) |
 | Edición | Barra de fórmulas, cuadro de nombres, controlador de relleno, copiar/cortar/pegar (también desde y hacia Excel), deshacer/rehacer, buscar, ordenar, insertar/eliminar filas y columnas, ancho y alto ajustables |
+| Tablas | **Inmovilizar paneles**, **filtros** con flechas en los encabezados (cada persona filtra sin afectar a las demás), **combinar y centrar**, formato por partes del texto (color, negrita, cursiva, subrayado) |
 | Hojas | Agregar, cambiar nombre, mover, eliminar; **Plantilla de pedido** con el formato de *PEDIDO BODEGAS 2024* |
 | Archivos | Importar `.xlsx` (por ejemplo los dos archivos de este repositorio), descargar `.xlsx` y `.csv`, imprimir |
 | Equipo | Presencia en tiempo real, enlace para compartir, varios libros (`#libro=codigo`) |

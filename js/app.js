@@ -27,7 +27,8 @@ const S = {
   sel: { ar: 0, ac: 0, fr: 0, fc: 0 },
   z: 1, editing: null, undo: [], redo: [], others: {}, clip: null,
   showF: false, grid: lsGet('xw-grid') !== '0',
-  fillColor: '#ffff00', fontColor: '#c00000', painter: null, extraRows: 0, ready: false
+  fillColor: '#ffff00', fontColor: '#c00000', painter: null, extraRows: 0, ready: false,
+  hidden: new Set(), filt: {}
 };
 let store = null, U = null, G = null, geomDirty = true, dataDirty = true, rendered = null, rafId = 0;
 const extents = new Map();
@@ -48,7 +49,7 @@ function onLoaded(sid) {
   loaded.add(sid);
   const p = loadReq.get(sid); if (p && p.res) p.res();
   calc.reset(); dataDirty = true; extents.delete(sid);
-  if (sid === S.sid) { geomDirty = true; if (!S.editing) { U.smode.textContent = 'Listo'; scheduleFormulaBar(); } }
+  if (sid === S.sid) { geomDirty = true; if (!S.editing) { U.smode.textContent = 'Listo'; scheduleFormulaBar(); } applyFilter(); }
   schedule();
   maybeRich(sid);
 }
@@ -133,7 +134,7 @@ const cur = () => S.tree.hojas[S.sid] || { nombre: 'Hoja1', orden: 0 };
 const cellsOf = sid => S.tree.celdas[sid] || {};
 const cellAt = (r, c, sid = S.sid) => cellsOf(sid)[keyOf(r, c)];
 const sortedSheets = () => Object.entries(S.tree.hojas).sort((a, b) => (a[1].orden ?? 0) - (b[1].orden ?? 0));
-const rng = () => { const s = S.sel; return { r1: Math.min(s.ar, s.fr), r2: Math.max(s.ar, s.fr), c1: Math.min(s.ac, s.fc), c2: Math.max(s.ac, s.fc) }; };
+const rng = () => { const s = S.sel; return s.box ? { ...s.box } : { r1: Math.min(s.ar, s.fr), r2: Math.max(s.ar, s.fr), c1: Math.min(s.ac, s.fc), c2: Math.max(s.ac, s.fc) }; };
 
 // ================================================================== INICIO
 init();
@@ -173,7 +174,8 @@ async function init() {
         if (!v && S.editing && S.editing.sid === sid) stopEdit();
         if (!v && S.clip && S.clip.sid === sid) S.clip = null;
         if (sid === S.sid) {
-          geomDirty = true;
+          geomDirty = true; delete S.sel.box;
+          if (v && S.ready) { if (!filterDef() && Object.keys(S.filt).length) { S.filt = {}; saveFilt(); } setTimeout(applyFilter, 0); }
           if (!v && S.ready) { switchSheet(sortedSheets()[0]?.[0]); if (prevName && !myDeletes.has(sid)) toast(`La hoja «${prevName}» fue eliminada por otro usuario`, 'warn', 6000); }
         }
         scheduleTabs(); schedule();
@@ -240,6 +242,7 @@ function switchSheet(sid) {
   S.extraRows = pos ? Math.max(S.sel.ar, S.sel.fr) + 200 : 0;
   S.pendingScroll = pos ? { t: pos.t || 0, l: pos.l || 0 } : null;
   U.gw.scrollTop = 0; U.gw.scrollLeft = 0;
+  S.hidden = new Set(); loadFilt(); applyFilter();
   renderTabs(); onSel(); schedule();
 }
 let posT = 0;
@@ -343,21 +346,65 @@ function applyRun(sel, prop, val) {
 }
 
 // ================================================================== GEOMETRÍA
+// Celdas combinadas: hojas/{id}/comb = { "A1": "C1" } (celda superior izquierda -> inferior derecha)
+const mergeCache = new WeakMap(), NO_MERGES = { list: [], idx: new Map() };
+function merges(sid = S.sid) {
+  const comb = S.tree.hojas[sid] && S.tree.hojas[sid].comb;
+  if (!comb || typeof comb !== 'object') return NO_MERGES;
+  let m = mergeCache.get(comb);
+  if (!m) {
+    m = { list: [], idx: new Map() };
+    for (const [k, v] of Object.entries(comb)) {
+      const a = parseKey(k), b = parseKey(String(v)); if (!a || !b || b.r < a.r || b.c < a.c) continue;
+      if ((b.r - a.r + 1) * (b.c - a.c + 1) > 5000) continue;
+      const g = { r1: a.r, c1: a.c, r2: b.r, c2: b.c, key: k };
+      m.list.push(g);
+      for (let r = a.r; r <= b.r; r++) for (let c = a.c; c <= b.c; c++) m.idx.set(keyOf(r, c), g);
+    }
+    mergeCache.set(comb, m);
+  }
+  return m;
+}
+const mergeAt = (r, c, sid = S.sid) => { const m = merges(sid); return m.idx.size ? m.idx.get(keyOf(r, c)) || null : null; };
+function expandMerges(R) {
+  const list = merges().list; if (!list.length) return R;
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const g of list) {
+      if (g.r2 < R.r1 || g.r1 > R.r2 || g.c2 < R.c1 || g.c1 > R.c2) continue;
+      if (g.r1 < R.r1) { R.r1 = g.r1; changed = true; } if (g.r2 > R.r2) { R.r2 = g.r2; changed = true; }
+      if (g.c1 < R.c1) { R.c1 = g.c1; changed = true; } if (g.c2 > R.c2) { R.c2 = g.c2; changed = true; }
+    }
+  }
+  return R;
+}
+const hid = r => S.hidden.size > 0 && S.hidden.has(r);
+
 function geom() {
   const sh = cur(), z = S.z, e = model.extent(S.sid);
   const nr = Math.max(MIN_ROWS, e.r + 101, S.extraRows), nc = Math.max(MIN_COLS, e.c + 11);
-  const an = sh.anchos || {}, al = sh.altos || {};
+  const an = sh.anchos || {}, al = sh.altos || {}, hd = S.hidden;
   const colX = new Float64Array(nc + 1), rowY = new Float64Array(nr + 1);
   for (let c = 0; c < nc; c++) colX[c + 1] = colX[c] + Math.round((an['c' + c] ?? DEF_W) * z);
-  for (let r = 0; r < nr; r++) rowY[r + 1] = rowY[r] + Math.round((al['r' + r] ?? DEF_H) * z);
+  for (let r = 0; r < nr; r++) rowY[r + 1] = rowY[r] + (hd.size && hd.has(r) ? 0 : Math.round((al['r' + r] ?? DEF_H) * z));
   const rhw = Math.round(Math.max(34, String(nr).length * 8 + 12) * z), hh = Math.round(HDR_H * z);
-  G = { nr, nc, colX, rowY, rhw, hh };
+  // Paneles inmovilizados (se ignoran si no caben en la pantalla)
+  let fr = Math.max(0, Math.min(+sh.fr || 0, nr - 1)), fc = Math.max(0, Math.min(+sh.fc || 0, nc - 1));
+  const vh = U.gw.clientHeight, vw = U.gw.clientWidth;
+  if (vh && rowY[fr] > (vh - hh) * 0.75) fr = 0;
+  if (vw && colX[fc] > (vw - rhw) * 0.75) fc = 0;
+  G = { nr, nc, colX, rowY, rhw, hh, fr, fc, FH: rowY[fr], FW: colX[fc] };
   U.gc.style.width = rhw + colX[nc] + 'px';
   U.gc.style.height = hh + rowY[nr] + 'px';
   U.chdr.style.height = hh + 'px';
   U.corner.style.width = rhw + 'px';
   U.rhdr.style.width = rhw + 'px';
   U.rhdr.style.height = rowY[nr] + 'px';
+  const box = (el, on, l, t, w, h) => { el.style.display = on ? 'block' : 'none'; if (on) { el.style.left = l + 'px'; el.style.top = t + 'px'; el.style.width = w; el.style.height = h; } };
+  box(U.fzT, fr > 0, 0, hh, '100%', G.FH + 'px');
+  box(U.fzL, fc > 0, rhw, 0, G.FW + 'px', rowY[nr] + 'px');
+  box(U.fzC, fr > 0 && fc > 0, rhw, hh, G.FW + 'px', G.FH + 'px');
   U.gc.style.setProperty('--z', z);
   geomDirty = false; rendered = null;
 }
@@ -368,6 +415,13 @@ const cellRect = (r1, c1, r2 = r1, c2 = c1) => ({
   x: G.rhw + G.colX[c1], y: G.hh + G.rowY[r1],
   w: G.colX[Math.min(c2, G.nc - 1) + 1] - G.colX[c1], h: G.rowY[Math.min(r2, G.nr - 1) + 1] - G.rowY[r1]
 });
+// Rectángulo de una celda teniendo en cuenta si está combinada
+const fullRect = (r, c) => { const g = mergeAt(r, c); return g ? cellRect(g.r1, g.c1, g.r2, g.c2) : cellRect(r, c); };
+// Posición en pantalla (para menús): las celdas inmovilizadas no se desplazan
+function clientRect(r, c) {
+  const k = fullRect(r, c), wr = U.gw.getBoundingClientRect();
+  return { x: wr.left + k.x - (c < G.fc ? 0 : U.gw.scrollLeft), y: wr.top + k.y - (r < G.fr ? 0 : U.gw.scrollTop), w: k.w, h: k.h };
+}
 
 // ================================================================== RENDER
 function schedule() { if (!rafId) rafId = requestAnimationFrame(render); }
@@ -387,7 +441,7 @@ function render() {
     S.pendingScroll = null; rendered = null;
   }
   const gw = U.gw, H = gw.clientHeight, W = gw.clientWidth, st = gw.scrollTop, sl = gw.scrollLeft;
-  const vr0 = rowAt(st), vr1 = rowAt(st + H - G.hh), vc0 = colAt(sl), vc1 = colAt(sl + W - G.rhw);
+  const vr0 = rowAt(st + G.FH), vr1 = rowAt(st + H - G.hh), vc0 = colAt(sl + G.FW), vc1 = colAt(sl + W - G.rhw);
   if (vr1 > G.nr - 60) { S.extraRows = G.nr + 500; geom(); }
   const need = !rendered || dataDirty || vr0 < rendered.r0 || vr1 > rendered.r1 || vc0 < rendered.c0 || vc1 > rendered.c1;
   if (need) {
@@ -401,34 +455,53 @@ function render() {
 }
 
 function renderCells(r0, r1, c0, c1) {
-  const cells = cellsOf(S.sid), z = S.z, out = [];
+  const { fr, fc, rhw, hh } = G;
+  U.cells.innerHTML = cellsHtml(r0, r1, c0, c1, 0, 0);
+  U.fzTc.innerHTML = fr ? cellsHtml(0, fr - 1, c0, c1, 0, hh) : '';
+  U.fzLc.innerHTML = fc ? cellsHtml(r0, r1, 0, fc - 1, rhw, hh) : '';
+  U.fzCc.innerHTML = fr && fc ? cellsHtml(0, fr - 1, 0, fc - 1, rhw, hh) : '';
+}
+// HTML de las celdas de una ventana; (ox, oy) es el origen del contenedor donde se insertan
+function cellsHtml(r0, r1, c0, c1, ox, oy) {
+  const cells = cellsOf(S.sid), z = S.z, out = [], mg = merges().idx;
   const { colX, rowY, rhw, hh } = G;
   for (let r = r0; r <= r1; r++) {
-    const top = hh + rowY[r], h = rowY[r + 1] - rowY[r];
+    let top = hh + rowY[r] - oy, h = rowY[r + 1] - rowY[r];
+    if (h <= 0) continue; // fila oculta por un filtro
     let coverTo = -1;
     for (let c = c0; c <= c1; c++) {
-      const left = rhw + colX[c], w = colX[c + 1] - colX[c];
-      const cell = cells[keyOf(r, c)];
+      let left = rhw + colX[c] - ox, w = colX[c + 1] - colX[c], cell, g = null, mh = h, mtop = top;
       const cov = c < coverTo ? ' cov' : '';
-      if (!cell) { out.push(`<div class="c${cov}" style="left:${left}px;top:${top}px;width:${w}px;height:${h}px"></div>`); continue; }
+      if (mg.size && (g = mg.get(keyOf(r, c)))) {
+        // de una combinación solo se dibuja una caja: en la primera celda suya que cae en esta ventana
+        if (r !== Math.max(r0, g.r1) || c !== Math.max(c0, g.c1)) continue;
+        left = rhw + colX[g.c1] - ox; mtop = hh + rowY[g.r1] - oy;
+        w = colX[g.c2 + 1] - colX[g.c1]; mh = rowY[g.r2 + 1] - rowY[g.r1];
+        cell = cells[g.key];
+        if (!cell) { out.push(`<div class="c mg" style="left:${left}px;top:${mtop}px;width:${w}px;height:${mh}px"></div>`); continue; }
+      } else {
+        cell = cells[keyOf(r, c)];
+        if (!cell) { out.push(`<div class="c${cov}" style="left:${left}px;top:${top}px;width:${w}px;height:${h}px"></div>`); continue; }
+      }
       const s = cell.s || {};
-      const v = calc.value(S.sid, r, c);
+      const vr = g ? g.r1 : r, vc = g ? g.c1 : c;
+      const v = calc.value(S.sid, vr, vc);
       const d = S.showF && cell.v ? { t: cell.v, al: 'l' } : display(v, s);
       const al = s.a || d.al;
       let width = w, extra = '';
-      if (d.t && !s.w && al === 'l' && typeof v === 'string' && !S.showF) {
+      if (!g && d.t && !s.w && al === 'l' && typeof v === 'string' && !S.showF) {
         const tw = measure(d.t, fontCss(s, z)) + 6 * z;
         if (tw > w) {
           let cc = c + 1, ww = w;
           while (ww < tw && cc < G.nc && cc <= c1 + 12) {
-            const n = cells[keyOf(r, cc)];
-            if (n && n.v != null && n.v !== '') break;
+            const kk = keyOf(r, cc), n = cells[kk];
+            if ((n && n.v != null && n.v !== '') || (mg.size && mg.has(kk))) break;
             ww += colX[cc + 1] - colX[cc]; cc++;
           }
           if (cc > c + 1) { width = ww; coverTo = cc - 1; extra = ' ov'; }
         }
       }
-      let st = `left:${left}px;top:${top}px;width:${width}px;height:${h}px;`;
+      let st = `left:${left}px;top:${mtop}px;width:${width}px;height:${mh}px;`;
       if (s.b) st += 'font-weight:700;';
       if (s.i) st += 'font-style:italic;';
       if (s.u) st += 'text-decoration:underline;';
@@ -445,79 +518,97 @@ function renderCells(r0, r1, c0, c1) {
       st += `justify-content:${al === 'r' ? 'flex-end' : al === 'c' ? 'center' : 'flex-start'};text-align:${al === 'r' ? 'right' : al === 'c' ? 'center' : 'left'};`;
       if (s.va) st += `align-items:${s.va === 't' ? 'flex-start' : s.va === 'm' ? 'center' : 'flex-end'};`;
       let cls = 'c' + extra + cov;
+      if (g) cls += ' mg';
       if (s.w) cls += ' wr';
       if (s.nt) cls += ' nt';
       const rich = s.rt && typeof v === 'string' && !S.showF && cell.v[0] !== "'";
       out.push(`<div class="${cls}" style="${st}"${s.nt ? ` title="${esc(s.nt)}"` : ''}>${rich ? `<span>${richHtml(d.t, runsOf(s))}</span>` : esc(d.t)}</div>`);
     }
   }
-  U.cells.innerHTML = out.join('');
+  return out.join('');
 }
 
 function renderHeaders(r0, r1, c0, c1) {
-  const R = rng(), { colX, rowY, rhw, hh } = G;
-  const fullCol = R.r1 === 0 && R.r2 >= G.nr - 1, fullRow = R.c1 === 0 && R.c2 >= G.nc - 1;
+  const R = rng(), { colX, rowY, rhw, hh, fr, fc } = G;
+  const fullCol = R.r1 === 0 && R.r2 >= G.nr - 1, fullRow = R.c1 === 0 && R.c2 >= G.nc - 1, flt = S.hidden.size > 0 ? ' flt' : '';
+  const ch = (c, top) => `<div class="ch${c >= R.c1 && c <= R.c2 ? (fullCol ? ' hf' : ' hs') : ''}" style="left:${rhw + colX[c]}px;width:${colX[c + 1] - colX[c]}px;height:${hh}px">${colName(c)}</div>`;
+  const rh = (r, oy) => rowY[r + 1] - rowY[r] <= 0 ? '' : `<div class="rh${flt}${r >= R.r1 && r <= R.r2 ? (fullRow ? ' hf' : ' hs') : ''}" style="top:${rowY[r] + oy}px;height:${rowY[r + 1] - rowY[r]}px;width:${rhw}px">${r + 1}</div>`;
   let h = '';
-  for (let c = c0; c <= c1; c++) {
-    const on = c >= R.c1 && c <= R.c2;
-    h += `<div class="ch${on ? (fullCol ? ' hf' : ' hs') : ''}" style="left:${rhw + colX[c]}px;width:${colX[c + 1] - colX[c]}px;height:${hh}px">${colName(c)}</div>`;
-  }
+  for (let c = c0; c <= c1; c++) h += ch(c);
   U.colheads.innerHTML = h;
   h = '';
-  for (let r = r0; r <= r1; r++) {
-    const on = r >= R.r1 && r <= R.r2;
-    h += `<div class="rh${on ? (fullRow ? ' hf' : ' hs') : ''}" style="top:${rowY[r]}px;height:${rowY[r + 1] - rowY[r]}px;width:${rhw}px">${r + 1}</div>`;
-  }
-  U.rhdr.innerHTML = h;
+  for (let r = r0; r <= r1; r++) h += rh(r, 0);
+  U.rowheads.innerHTML = h;
+  h = '';
+  for (let c = 0; c < fc; c++) h += ch(c);
+  for (let r = 0; r < fr; r++) h += rh(r, hh);
+  U.fzheads.innerHTML = h;
 }
 
-function renderOverlays() {
-  const R = rng(), z = S.z;
-  const a = cellRect(R.r1, R.c1, R.r2, R.c2), ac = cellRect(S.sel.ar, S.sel.ac);
+// Selección, usuarios, referencias de fórmulas, botones de filtro… (ox, oy) = origen del contenedor
+function overlayHtml(ox, oy) {
+  const R = rng(), box = (k, d = 1) => `left:${k.x - ox - d}px;top:${k.y - oy - d}px;width:${k.w + d}px;height:${k.h + d}px`;
+  const a = cellRect(R.r1, R.c1, R.r2, R.c2), ac = fullRect(S.sel.ar, S.sel.ac);
   let h = '';
-  const multi = R.r1 !== R.r2 || R.c1 !== R.c2;
+  const multi = a.w !== ac.w || a.h !== ac.h;
   if (multi) {
-    const ox = ac.x - a.x, oy = ac.y - a.y;
-    const clip = `polygon(evenodd,0 0,${a.w}px 0,${a.w}px ${a.h}px,0 ${a.h}px,0 0,${ox}px ${oy}px,${ox + ac.w}px ${oy}px,${ox + ac.w}px ${oy + ac.h}px,${ox}px ${oy + ac.h}px,${ox}px ${oy}px)`;
-    h += `<div class="seltint" style="left:${a.x}px;top:${a.y}px;width:${a.w}px;height:${a.h}px;clip-path:${clip}"></div>`;
+    const px = ac.x - a.x, py = ac.y - a.y;
+    const clip = `polygon(evenodd,0 0,${a.w}px 0,${a.w}px ${a.h}px,0 ${a.h}px,0 0,${px}px ${py}px,${px + ac.w}px ${py}px,${px + ac.w}px ${py + ac.h}px,${px}px ${py + ac.h}px,${px}px ${py}px)`;
+    h += `<div class="seltint" style="${box(a, 0)};clip-path:${clip}"></div>`;
   }
-  if (S.clip && S.clip.sid === S.sid) {
-    const k = cellRect(S.clip.r1, S.clip.c1, S.clip.r2, S.clip.c2);
-    h += `<div class="ants" style="left:${k.x - 1}px;top:${k.y - 1}px;width:${k.w + 1}px;height:${k.h + 1}px"></div>`;
-  }
+  if (S.clip && S.clip.sid === S.sid) h += `<div class="ants" style="${box(cellRect(S.clip.r1, S.clip.c1, S.clip.r2, S.clip.c2))}"></div>`;
   if (S.editing && S.editing.sid === S.sid) {
     formulaRefs(U.ed.value).forEach((f, i) => {
       if (f.sheet && model.sheetIdByName(f.sheet) !== S.sid) return;
-      const k = cellRect(f.r1, f.c1, Math.min(f.r2, G.nr - 1), f.c2), col = PALETTE[i % PALETTE.length];
-      h += `<div class="fref" style="left:${k.x - 1}px;top:${k.y - 1}px;width:${k.w + 1}px;height:${k.h + 1}px;border-color:${col};background:${col}18"></div>`;
+      const col = PALETTE[i % PALETTE.length];
+      h += `<div class="fref" style="${box(cellRect(f.r1, f.c1, Math.min(f.r2, G.nr - 1), f.c2))};border-color:${col};background:${col}18"></div>`;
     });
   }
   for (const o of Object.values(S.others)) {
-    if (o.hoja !== S.sid || o.ar == null) continue;
-    const k = cellRect(o.ar, o.ac);
-    const lbl = Date.now() - (o._t || 0) < 3000 ? `<span style="background:${o.color}">${esc(o.nombre)}</span>` : '';
-    h += `<div class="peer" style="left:${k.x - 1}px;top:${k.y - 1}px;width:${k.w + 1}px;height:${k.h + 1}px;border-color:${o.color}" title="${esc(o.nombre)}">${lbl}</div>`;
+    if (o.hoja !== S.sid || o.ar == null || o.ar >= G.nr || o.ac >= G.nc) continue;
+    const col = safeCol(o.color) || '#888';
+    const lbl = Date.now() - (o._t || 0) < 3000 ? `<span style="background:${col}">${esc(o.nombre)}</span>` : '';
+    h += `<div class="peer" style="${box(fullRect(o.ar, o.ac))};border-color:${col}" title="${esc(o.nombre)}">${lbl}</div>`;
   }
-  if (!S.editing) h += `<div class="selbox" style="left:${a.x - 1}px;top:${a.y - 1}px;width:${a.w + 1}px;height:${a.h + 1}px"></div>`;
-  if (!S.editing) h += `<div class="fillh" data-fill="1" style="left:${a.x + a.w - 4}px;top:${a.y + a.h - 4}px"></div>`;
-  if (S.fillPrev) { const k = S.fillPrev; const q = cellRect(k.r1, k.c1, k.r2, k.c2); h += `<div class="fillprev" style="left:${q.x - 1}px;top:${q.y - 1}px;width:${q.w + 1}px;height:${q.h + 1}px"></div>`; }
-  U.ovl.innerHTML = h;
+  const f = filterDef();
+  if (f) for (let c = f.c1; c <= Math.min(f.c2, G.nc - 1); c++) {
+    const k = fullRect(f.r, c), sz = Math.round(16 * S.z);
+    if (k.h > 0) h += `<div class="fbtn${S.filt[c] ? ' on' : ''}" data-filter="${c}" style="left:${k.x - ox + k.w - sz - 2}px;top:${k.y - oy + k.h - sz - 2}px;width:${sz}px;height:${sz}px"><span class="ms">${S.filt[c] ? 'filter_alt' : 'arrow_drop_down'}</span></div>`;
+  }
+  if (!S.editing) h += `<div class="selbox" style="${box(a)}"></div>`;
+  if (!S.editing) h += `<div class="fillh" data-fill="1" style="left:${a.x - ox + a.w - 4}px;top:${a.y - oy + a.h - 4}px"></div>`;
+  if (S.fillPrev) { const k = S.fillPrev; h += `<div class="fillprev" style="${box(cellRect(k.r1, k.c1, k.r2, k.c2))}"></div>`; }
+  return h;
+}
+function renderOverlays() {
+  const { fr, fc, rhw, hh } = G;
+  U.ovl.innerHTML = overlayHtml(0, 0);
+  U.fzTo.innerHTML = fr ? overlayHtml(0, hh) : '';
+  U.fzLo.innerHTML = fc ? overlayHtml(rhw, hh) : '';
+  U.fzCo.innerHTML = fr && fc ? overlayHtml(rhw, hh) : '';
   if (!S.editing) placeEditor();
-  void z;
 }
 
 // ================================================================== SELECCIÓN
 function select(r, c, fr = r, fc = c, scroll = true) {
   if (!G) return;
   const cl = (v, n) => Math.max(0, Math.min(n - 1, v));
-  S.sel = { ar: cl(r, G.nr), ac: cl(c, G.nc), fr: cl(fr, G.nr), fc: cl(fc, G.nc) };
-  if (scroll) ensureVisible(S.sel.fr, S.sel.fc);
+  r = cl(r, G.nr); c = cl(c, G.nc); fr = cl(fr, G.nr); fc = cl(fc, G.nc);
+  const g = mergeAt(r, c);
+  if (g) { if (fr === r && fc === c) { fr = g.r2; fc = g.c2; } r = g.r1; c = g.c1; }
+  S.sel = { ar: r, ac: c, fr, fc };
+  if (merges().list.length) { // una selección nunca corta una celda combinada
+    const b = { r1: Math.min(r, fr), r2: Math.max(r, fr), c1: Math.min(c, fc), c2: Math.max(c, fc) }, e = expandMerges({ ...b });
+    if (e.r1 !== b.r1 || e.r2 !== b.r2 || e.c1 !== b.c1 || e.c2 !== b.c2) S.sel.box = e;
+  }
+  if (scroll) ensureVisible(fr, fc);
   onSel();
 }
 let presT = 0;
 function onSel() {
-  const R = rng();
-  U.namebox.value = drag && (R.r1 !== R.r2 || R.c1 !== R.c2) ? `${R.r2 - R.r1 + 1}F x ${R.c2 - R.c1 + 1}C` : keyOf(S.sel.ar, S.sel.ac); // como Excel
+  const R = rng(), g = mergeAt(S.sel.ar, S.sel.ac);
+  const one = (R.r1 === R.r2 && R.c1 === R.c2) || (g && g.r1 === R.r1 && g.r2 === R.r2 && g.c1 === R.c1 && g.c2 === R.c2);
+  U.namebox.value = drag && !one ? `${R.r2 - R.r1 + 1}F x ${R.c2 - R.c1 + 1}C` : keyOf(S.sel.ar, S.sel.ac); // como Excel
   if (!S.editing) U.fx.value = cellAt(S.sel.ar, S.sel.ac)?.v ?? '';
   refreshRibbon(); updateStats(); schedule(); savePos();
   clearTimeout(presT);
@@ -528,12 +619,16 @@ function scheduleFormulaBar() { clearTimeout(fbT); fbT = setTimeout(() => { if (
 
 function ensureVisible(r, c) {
   if (!G) return;
-  const gw = U.gw, k = cellRect(r, c);
+  const gw = U.gw, k = cellRect(r, c), { hh, rhw, FH, FW } = G;
   const vw = gw.clientWidth, vh = gw.clientHeight;
-  if (k.y - G.hh < gw.scrollTop) gw.scrollTop = k.y - G.hh;
-  else if (k.y + k.h > gw.scrollTop + vh) gw.scrollTop = k.y + k.h - vh;
-  if (k.x - G.rhw < gw.scrollLeft) gw.scrollLeft = k.x - G.rhw;
-  else if (k.x + k.w > gw.scrollLeft + vw) gw.scrollLeft = Math.min(k.x - G.rhw, k.x + k.w - vw);
+  if (r >= G.fr) {
+    if (k.y - hh - FH < gw.scrollTop) gw.scrollTop = k.y - hh - FH;
+    else if (k.y + k.h > gw.scrollTop + vh) gw.scrollTop = k.y + k.h - vh;
+  }
+  if (c >= G.fc) {
+    if (k.x - rhw - FW < gw.scrollLeft) gw.scrollLeft = k.x - rhw - FW;
+    else if (k.x + k.w > gw.scrollLeft + vw) gw.scrollLeft = Math.min(k.x - rhw - FW, k.x + k.w - vw);
+  }
 }
 const filled = (r, c) => { const x = cellAt(r, c); return !!(x && x.v != null && x.v !== ''); };
 function edge(r, c, dr, dc) {
@@ -554,22 +649,29 @@ function edge(r, c, dr, dc) {
 function move(dr, dc, extend = false, jump = false) {
   const s = S.sel;
   let r = extend ? s.fr : s.ar, c = extend ? s.fc : s.ac;
-  if (jump) [r, c] = edge(r, c, dr, dc); else { r += dr; c += dc; }
+  if (jump) [r, c] = edge(r, c, dr, dc);
+  else {
+    const g = extend ? null : mergeAt(r, c); // desde una celda combinada se sale por su borde
+    if (g) { if (dr > 0) r = g.r2; if (dc > 0) c = g.c2; }
+    r += dr; c += dc;
+  }
+  if (dr) { const sg = Math.sign(dr); while (r > 0 && r < G.nr - 1 && hid(r)) r += sg; if (hid(r)) r = extend ? s.fr : s.ar; } // salta filas ocultas por el filtro
   if (extend) select(s.ar, s.ac, r, c); else select(r, c);
 }
 function updateStats() {
-  const R = rng();
-  if (R.r1 === R.r2 && R.c1 === R.c2) { U.stats.textContent = ''; return; }
+  const R = rng(), g = mergeAt(S.sel.ar, S.sel.ac);
+  if ((R.r1 === R.r2 && R.c1 === R.c2) || (g && g.r2 === R.r2 && g.c2 === R.c2 && g.r1 === R.r1 && g.c1 === R.c1)) { U.stats.textContent = ''; return; }
   let n = 0, cnt = 0, sum = 0;
-  calc.each({ sid: S.sid, ...R }, v => { cnt++; if (typeof v === 'number') { n++; sum += v; } });
+  calc.each({ sid: S.sid, ...R }, (v, r) => { if (hid(r)) return; cnt++; if (typeof v === 'number') { n++; sum += v; } });
   U.stats.textContent = cnt < 2 ? '' : n ? `Promedio: ${fmtGeneral(+(sum / n).toFixed(10))}    Recuento: ${cnt}    Suma: ${fmtGeneral(+sum.toFixed(10))}` : `Recuento: ${cnt}`;
 }
 
 // ================================================================== EDICIÓN
 function placeEditor() {
   if (!G) return;
-  const ed = U.ed, k = cellRect(S.sel.ar, S.sel.ac);
-  ed.style.left = k.x + 'px'; ed.style.top = k.y + 'px';
+  const ed = U.ed, k = fullRect(S.sel.ar, S.sel.ac), fzr = S.sel.ar < G.fr, fzc = S.sel.ac < G.fc;
+  ed.style.left = k.x + (fzc ? U.gw.scrollLeft : 0) + 'px'; ed.style.top = k.y + (fzr ? U.gw.scrollTop : 0) + 'px';
+  ed.style.zIndex = U.edbg.style.zIndex = S.editing && (fzr || fzc) ? 7 : '';
   if (!S.editing) { ed.style.width = k.w + 'px'; ed.style.height = k.h + 'px'; return; }
   syncRuns();
   const s = cellAt(S.editing.r, S.editing.c)?.s || {};
@@ -707,6 +809,7 @@ function boundedSel() {
 function styleSel(fn) {
   const R = boundedSel(), cells = cellsOf(S.sid), upd = {};
   for (let r = R.r1; r <= R.r2; r++) for (let c = R.c1; c <= R.c2; c++) {
+    if (hid(r)) continue; // con filtro, solo las filas visibles
     const k = keyOf(r, c), old = cells[k];
     upd[`celdas/${S.sid}/${k}`] = cellObj(old?.v, fn({ ...(old?.s || {}) }, old));
   }
@@ -735,7 +838,7 @@ function borderSel(kind) {
 function clearSel(what) {
   const R = boundedSel(), cells = cellsOf(S.sid), upd = {};
   for (let r = R.r1; r <= R.r2; r++) for (let c = R.c1; c <= R.c2; c++) {
-    const k = keyOf(r, c), old = cells[k]; if (!old) continue;
+    const k = keyOf(r, c), old = cells[k]; if (!old || hid(r)) continue;
     upd[`celdas/${S.sid}/${k}`] = what === 'all' ? null : what === 'fmt' ? cellObj(old.v, {}) : cellObj('', noRt(old.s));
   }
   if (Object.keys(upd).length) write(upd);
@@ -744,12 +847,13 @@ function clearSel(what) {
 // ================================================================== PORTAPAPELES
 function selectionMatrix(R) {
   const cells = cellsOf(S.sid), m = [];
-  for (let r = R.r1; r <= R.r2; r++) { const row = []; for (let c = R.c1; c <= R.c2; c++) row.push(clone(cells[keyOf(r, c)]) || null); m.push(row); }
+  for (let r = R.r1; r <= R.r2; r++) { if (hid(r)) continue; const row = []; for (let c = R.c1; c <= R.c2; c++) row.push(clone(cells[keyOf(r, c)]) || null); m.push(row); }
   return m;
 }
 function tsvOf(R) {
   const lines = [];
   for (let r = R.r1; r <= R.r2; r++) {
+    if (hid(r)) continue;
     const row = [];
     for (let c = R.c1; c <= R.c2; c++) {
       const t = display(calc.value(S.sid, r, c), cellAt(r, c)?.s).t;
@@ -762,7 +866,9 @@ function tsvOf(R) {
 function doCopy(cut, ev) {
   const R = boundedSel();
   const text = tsvOf(R);
-  S.clip = { sid: S.sid, ...R, m: selectionMatrix(R), text, cut }; S.textClip = null;
+  const rows = []; for (let r = R.r1; r <= R.r2; r++) if (!hid(r)) rows.push(r);
+  if (!rows.length) return;
+  S.clip = { sid: S.sid, ...R, rows, m: selectionMatrix(R), text, cut }; S.textClip = null;
   if (ev) { ev.clipboardData.setData('text/plain', text); ev.preventDefault(); }
   else if (navigator.clipboard) navigator.clipboard.writeText(text).catch(() => {});
   schedule();
@@ -826,11 +932,11 @@ function doPaste(text, html, mode = 'all') {
     const h = T ? clip.m[0].length : clip.m.length, w = T ? clip.m.length : clip.m[0].length;
     const th = (R.r2 - R.r1 + 1) % h === 0 ? R.r2 - R.r1 + 1 : h, tw = (R.c2 - R.c1 + 1) % w === 0 ? R.c2 - R.c1 + 1 : w;
     const move = clip.cut && mode === 'all';
-    if (move) for (let r = clip.r1; r <= clip.r2; r++) for (let c = clip.c1; c <= clip.c2; c++) upd[`celdas/${clip.sid}/${keyOf(r, c)}`] = null;
+    if (move) for (const r of clip.rows) for (let c = clip.c1; c <= clip.c2; c++) upd[`celdas/${clip.sid}/${keyOf(r, c)}`] = null;
     const srcSheet = S.tree.hojas[clip.sid]?.nombre || '';
     for (let i = 0; i < th; i++) for (let j = 0; j < tw; j++) {
       const si = T ? j % w : i % h, sj = T ? i % h : j % w;
-      const src = clip.m[si][sj], r = R.r1 + i, c = R.c1 + j, sr = clip.r1 + si, sc = clip.c1 + sj;
+      const src = clip.m[si][sj], r = R.r1 + i, c = R.c1 + j, sr = clip.rows[si], sc = clip.c1 + sj;
       const k = keyOf(r, c), old = cells[k];
       let v = src?.v, s = src?.s;
       if (v && !move && v[0] === '=') v = T ? transposeFormula(v, sr, sc, r, c) : shiftFormula(v, r - sr, c - sc);
@@ -848,6 +954,20 @@ function doPaste(text, html, mode = 'all') {
     return;
   }
   if (mode === 'formats' || mode === 'link') return toast('Esa opción de pegado solo está disponible para celdas copiadas de esta hoja de cálculo.');
+  const tc = S.textClip;
+  if (tc && mode === 'all' && sameText(text, tc.t) && !/[\t"]/.test(tc.t)) { // texto copiado desde dentro de una celda: conserva colores y negritas
+    let off = 0; const lines = tc.t.split('\n');
+    lines.forEach((line, i) => {
+      const k = keyOf(R.r1 + i, R.c1), old = cells[k];
+      const { v, s } = normalizeInput(line, noRt(old?.s));
+      if (v === line && v[0] !== '=' && v[0] !== "'") { const rt = segsToRuns(tc.segs, off, off + line.length, 0, s); if (rt.length) s.rt = rt; }
+      upd[`celdas/${S.sid}/${k}`] = cellObj(v, s);
+      off += line.length + 1;
+    });
+    write(upd);
+    select(R.r1, R.c1, R.r1 + lines.length - 1, R.c1, false);
+    return;
+  }
   const hrows = htmlRows(html);
   let rows = hrows || parseTSV(text || '').map(r => r.map(t => ({ t })));
   if (!rows.length) return;
@@ -874,7 +994,7 @@ async function pasteMode(mode = 'all') {
       }
     } else text = await navigator.clipboard.readText();
   } catch { /* sin permiso: usa lo copiado en esta página */ }
-  if (text == null && !S.clip && S.textClip) text = S.textClip;
+  if (text == null && !S.clip && S.textClip) text = S.textClip.t;
   if (text == null && !S.clip) return toast('El navegador no dejó leer el portapapeles. Usa Ctrl+V para pegar.');
   doPaste(text, html, mode);
 }
@@ -972,7 +1092,30 @@ function shiftStructure(axis, at, n) {
     nn[pre + j] = v;
   }
   upd[`hojas/${sid}/${prop}`] = Object.keys(nn).length ? nn : null;
+  const f = i => n > 0 ? (i >= at ? i + n : i) : (i >= at && i < at - n ? null : i >= at - n ? i + n : i);
+  if (sh.comb) { // celdas combinadas
+    const nc = {};
+    for (const g of merges(sid).list) {
+      let lo = f(axis === 'r' ? g.r1 : g.c1), hi = f(axis === 'r' ? g.r2 : g.c2);
+      if (lo === null && hi === null) continue;
+      if (lo === null) lo = at; if (hi === null) hi = at - 1;
+      const a = axis === 'r' ? { r1: lo, r2: hi, c1: g.c1, c2: g.c2 } : { r1: g.r1, r2: g.r2, c1: lo, c2: hi };
+      if (a.r2 < a.r1 || a.c2 < a.c1 || (a.r1 === a.r2 && a.c1 === a.c2)) continue;
+      nc[keyOf(a.r1, a.c1)] = keyOf(a.r2, a.c2);
+    }
+    upd[`hojas/${sid}/comb`] = Object.keys(nc).length ? nc : null;
+  }
+  const fl = sh.filtro;
+  if (fl && fl.r != null) { // rango del filtro
+    let nf = { ...fl };
+    if (axis === 'r') { const r = f(fl.r); nf = r === null ? null : { ...fl, r }; }
+    else { let c1 = f(fl.c1), c2 = f(fl.c2); if (c1 === null) c1 = at; if (c2 === null) c2 = at - 1; nf = c2 < c1 ? null : { ...fl, c1, c2 }; S.filt = {}; saveFilt(); }
+    if (JSON.stringify(nf) !== JSON.stringify(fl)) upd[`hojas/${sid}/filtro`] = nf;
+  }
+  const fk = axis === 'r' ? 'fr' : 'fc', fz = +sh[fk] || 0;
+  if (fz && at < fz) upd[`hojas/${sid}/${fk}`] = Math.max(0, n > 0 ? fz + n : fz - Math.min(-n, fz - at)) || null;
   write(upd);
+  setTimeout(applyFilter, 30);
 }
 // Otro usuario insertó o eliminó filas/columnas: todo lo local se mueve con ellas (como Excel compartido)
 const myOps = new Set(), lastOp = {}, myDeletes = new Set();
@@ -988,7 +1131,9 @@ function remoteStructure(sid, op) {
   if (sid === S.sid) {
     const a = k === 'r' ? ['ar', 'fr'] : ['ac', 'fc'];
     for (const key of a) { const nv = f(S.sel[key]); S.sel[key] = nv === null ? Math.max(0, op.at) : nv; }
-    geomDirty = true; onSel();
+    delete S.sel.box;
+    if (k === 'c') { S.filt = {}; saveFilt(); }
+    geomDirty = true; onSel(); setTimeout(applyFilter, 30);
   }
   if (S.clip && S.clip.sid === sid) S.clip = null;
   const touches = e => Object.keys(e.after).some(p => p.startsWith(`celdas/${sid}/`) || p.startsWith(`hojas/${sid}/`));
@@ -1016,11 +1161,198 @@ function autofitCol(c) {
   setSize('c', [c], Math.min(w, 600));
 }
 
+// ================================================================== INMOVILIZAR PANELES
+function setFreeze(fr, fc) {
+  if (fr > 0 || fc > 0) {
+    if (!G) geom();
+    const vh = U.gw.clientHeight - G.hh, vw = U.gw.clientWidth - G.rhw;
+    if (G.rowY[Math.min(fr, G.nr - 1)] > vh * 0.75 || G.colX[Math.min(fc, G.nc - 1)] > vw * 0.75)
+      return toast('Los paneles inmovilizados no caben en la pantalla. Elige una celda más cerca de la esquina superior izquierda (por ejemplo, justo debajo de los encabezados).', 'warn', 7000);
+  }
+  U.gw.scrollTop = 0; U.gw.scrollLeft = 0;
+  write({ [`hojas/${S.sid}/fr`]: fr || null, [`hojas/${S.sid}/fc`]: fc || null });
+}
+
+// ================================================================== COMBINAR CELDAS
+function mergeSel(center) {
+  const R = rng(), sid = S.sid, list = merges().list, cells = cellsOf(sid), upd = {};
+  const hit0 = list.filter(g => !(g.r2 < R.r1 || g.r1 > R.r2 || g.c2 < R.c1 || g.c1 > R.c2));
+  for (const g of hit0) upd[`hojas/${sid}/comb/${g.key}`] = null;
+  const same = hit0.length === 1 && hit0[0].r1 === R.r1 && hit0[0].r2 === R.r2 && hit0[0].c1 === R.c1 && hit0[0].c2 === R.c2;
+  if (same) { write(upd); select(R.r1, R.c1); return; } // ya estaba combinada: se separa
+  if (R.r1 === R.r2 && R.c1 === R.c2) return toast('Selecciona dos o más celdas para combinarlas.');
+  if ((R.r2 - R.r1 + 1) * (R.c2 - R.c1 + 1) > 2000) return toast('La selección es demasiado grande para combinarla.', 'warn');
+  // se conserva el valor de la celda superior izquierda (o el primero que haya), como Excel
+  let keep = null;
+  for (let r = R.r1; r <= R.r2 && !keep; r++) for (let c = R.c1; c <= R.c2 && !keep; c++) { const x = cells[keyOf(r, c)]; if (x && x.v != null && x.v !== '') keep = x; }
+  const mk = keyOf(R.r1, R.c1), ms = { ...((cells[mk] && cells[mk].s) || (keep && keep.s) || {}) };
+  if (!(cells[mk] && cells[mk].v)) { delete ms.rt; if (keep && keep.s && keep.s.rt) ms.rt = keep.s.rt; }
+  if (center) ms.a = 'c';
+  for (let r = R.r1; r <= R.r2; r++) for (let c = R.c1; c <= R.c2; c++) {
+    const k = keyOf(r, c), x = cells[k];
+    if (k === mk) upd[`celdas/${sid}/${k}`] = cellObj(keep ? keep.v : '', ms);
+    else if (x && x.v != null && x.v !== '') upd[`celdas/${sid}/${k}`] = cellObj('', noRt(x.s));
+  }
+  upd[`hojas/${sid}/comb/${mk}`] = keyOf(R.r2, R.c2);
+  write(upd);
+  select(R.r1, R.c1);
+}
+function unmergeSel() {
+  const R = rng(), upd = {};
+  for (const g of merges().list) if (!(g.r2 < R.r1 || g.r1 > R.r2 || g.c2 < R.c1 || g.c1 > R.c2)) upd[`hojas/${S.sid}/comb/${g.key}`] = null;
+  if (!Object.keys(upd).length) return toast('No hay celdas combinadas en la selección.');
+  write(upd); select(R.r1, R.c1);
+}
+
+// ================================================================== FILTROS
+// El rango con flechas (hojas/{id}/filtro = {r, c1, c2}) es compartido; lo que cada persona filtra es solo suyo.
+function filterDef() { const f = cur().filtro; return f && f.r != null && f.c1 != null && f.c2 >= f.c1 ? f : null; }
+const filtKey = () => `xw-filt:${S.book}:${S.sid}`;
+function loadFilt() { try { S.filt = JSON.parse(lsGet(filtKey()) || '{}') || {}; } catch { S.filt = {}; } }
+function saveFilt() { if (Object.keys(S.filt).length) lsSet(filtKey(), JSON.stringify(S.filt)); else { try { localStorage.removeItem(filtKey()); } catch { /* ignorar */ } } }
+function filterEnd(f) {
+  const e = model.extent(S.sid); let r = f.r + 1;
+  for (; r <= e.r; r++) { let any = false; for (let c = f.c1; c <= f.c2 && !any; c++) any = filled(r, c); if (!any) break; }
+  return r - 1;
+}
+const filtText = (r, c) => display(calc.value(S.sid, r, c), cellAt(r, c)?.s).t.trim();
+function applyFilter() {
+  const f = filterDef(), before = S.hidden.size;
+  const hidden = new Set(); let total = 0;
+  if (f && loaded.has(S.sid)) {
+    const cols = Object.keys(S.filt).map(Number).filter(c => c >= f.c1 && c <= f.c2 && Array.isArray(S.filt[c]) && S.filt[c].length);
+    if (cols.length) {
+      const sets = cols.map(c => new Set(S.filt[c])), end = filterEnd(f);
+      total = end - f.r;
+      for (let r = f.r + 1; r <= end; r++) for (let i = 0; i < cols.length; i++) if (sets[i].has(filtText(r, cols[i]))) { hidden.add(r); break; }
+    }
+  }
+  S.hidden = hidden;
+  U.sfilt.textContent = hidden.size ? `Se encontraron ${total - hidden.size} de ${total} registros` : '';
+  if (hidden.size || before) { geomDirty = true; if (hid(S.sel.ar)) { let r = S.sel.ar; while (r > 0 && hidden.has(r)) r--; S.sel = { ar: r, ac: S.sel.ac, fr: r, fc: S.sel.ac }; } }
+  schedule();
+}
+function toggleFilter() {
+  const f = filterDef();
+  if (f) { S.filt = {}; saveFilt(); write({ [`hojas/${S.sid}/filtro`]: null }); return; }
+  const R = rng(); let r = S.sel.ar, c1 = R.c1, c2 = R.c2;
+  if (R.r1 === R.r2 && R.c1 === R.c2) {
+    if (!filled(r, c1)) return toast('Selecciona una celda dentro de la tabla (o los encabezados) para activar el filtro.');
+    while (r > 0 && filled(r - 1, S.sel.ac)) r--;           // sube hasta el encabezado
+    while (c1 > 0 && filled(r, c1 - 1)) c1--;
+    while (c2 < G.nc - 1 && filled(r, c2 + 1)) c2++;
+  } else r = R.r1;
+  S.filt = {}; saveFilt();
+  write({ [`hojas/${S.sid}/filtro`]: { r, c1, c2 } });
+}
+function clearFilter(c) {
+  if (c == null) S.filt = {}; else delete S.filt[c];
+  saveFilt(); applyFilter();
+}
+function filterByValue() {
+  if (!filterDef()) toggleFilter();
+  setTimeout(() => {
+    const f = filterDef(); if (!f) return;
+    const { ar, ac } = S.sel; if (ar <= f.r || ac < f.c1 || ac > f.c2) return toast('Selecciona una celda de datos dentro de la tabla filtrada.');
+    const keep = filtText(ar, ac), all = new Set(), end = filterEnd(f);
+    for (let r = f.r + 1; r <= end; r++) all.add(filtText(r, ac));
+    all.delete(keep); S.filt[ac] = [...all]; saveFilt(); applyFilter();
+  }, 60);
+}
+function filterMenu(c, at) {
+  const f = filterDef(); if (!f) return;
+  const end = filterEnd(f), vals = new Map();
+  for (let r = f.r + 1; r <= end && vals.size < 3000; r++) { const t = filtText(r, c); vals.set(t, (vals.get(t) || 0) + 1); }
+  const excl = new Set(S.filt[c] || []);
+  const list = [...vals.keys()].sort((a, b) => (a === '') - (b === '') || a.localeCompare(b, 'es', { numeric: true }));
+  const head = filtText(f.r, c) || colName(c);
+  const data = { r1: f.r + 1, r2: end, c1: f.c1, c2: f.c2 };
+  const html = `<div class="fpanel"><input class="fsearch" placeholder="Buscar">
+    <div class="flist"><label><input type="checkbox" data-all ${excl.size ? '' : 'checked'}><span>(Seleccionar todo)</span></label>
+    ${list.map((v, i) => `<label data-t="${esc(v.toLowerCase())}"><input type="checkbox" data-i="${i}" ${excl.has(v) ? '' : 'checked'}><span>${v === '' ? '(Vacías)' : esc(v)}</span></label>`).join('')}</div>
+    <div class="fbtns"><button class="fok">Aceptar</button><button class="fno">Cancelar</button></div></div>`;
+  menu([
+    { icon: 'north', label: 'Ordenar de A a Z', run: () => { sortRange(data, c, false); setTimeout(applyFilter, 50); } },
+    { icon: 'south', label: 'Ordenar de Z a A', run: () => { sortRange(data, c, true); setTimeout(applyFilter, 50); } },
+    '-',
+    { icon: 'filter_alt_off', label: `Borrar filtro de «${esc(head.slice(0, 30))}»`, disabled: !excl.size, run: () => clearFilter(c) },
+    { html, bind: (el, close) => {
+      const boxes = [...el.querySelectorAll('input[data-i]')], all = el.querySelector('[data-all]'), ok = el.querySelector('.fok'), search = el.querySelector('.fsearch');
+      const visible = b => b.parentElement.style.display !== 'none';
+      const sync = () => { const v = boxes.filter(visible); all.checked = v.length > 0 && v.every(b => b.checked); ok.disabled = !v.some(b => b.checked); };
+      all.addEventListener('change', () => { boxes.filter(visible).forEach(b => { b.checked = all.checked; }); sync(); });
+      boxes.forEach(b => b.addEventListener('change', sync));
+      search.addEventListener('input', () => { const q = search.value.trim().toLowerCase(); boxes.forEach(b => { b.parentElement.style.display = !q || b.parentElement.dataset.t.includes(q) ? '' : 'none'; }); sync(); });
+      const accept = () => {
+        const out = []; boxes.forEach(b => { if (!(visible(b) && b.checked)) out.push(list[+b.dataset.i]); });
+        if (out.length) S.filt[c] = out; else delete S.filt[c];
+        saveFilt(); close(); applyFilter(); focusGrid();
+      };
+      ok.addEventListener('click', accept);
+      el.querySelector('.fno').addEventListener('click', () => { close(); focusGrid(); });
+      search.addEventListener('keydown', e => { if (e.key === 'Enter' && !ok.disabled) accept(); if (e.key === 'Escape') { close(); focusGrid(); } e.stopPropagation(); });
+      setTimeout(() => search.focus(), 30);
+    } }
+  ], at, { cls: 'fmenu' });
+}
+
+// ================================================================== COPIAR TEXTO CON SU FORMATO POR PARTES
+// Tramos con el formato efectivo (celda + parte) del texto [a, z) que se está editando
+function captureSegs(a, z) {
+  syncRuns();
+  const e = S.editing, base = cellAt(e.r, e.c, e.sid)?.s || {}, at = [];
+  for (const r of e.rt) for (let i = r.a; i < r.z; i++) at[i] = r;
+  const segs = []; let lastK = null;
+  for (let i = a; i < z; i++) {
+    const r = at[i], o = { c: ((r && r.c) || base.c || '#000000').toLowerCase() };
+    for (const k of ['b', 'i', 'u']) o[k] = !!(r && r[k] != null ? r[k] : base[k]);
+    const key = JSON.stringify(o);
+    if (key === lastK) segs[segs.length - 1].z = i - a + 1; else segs.push({ a: i - a, z: i - a + 1, ...o });
+    lastK = key;
+  }
+  return segs;
+}
+// Convierte esos tramos en formato relativo a la celda de destino
+function segsToRuns(segs, from, to, off, tb) {
+  const out = [], base = (tb && tb.c ? tb.c : '#000000').toLowerCase();
+  for (const g of segs) {
+    const a = Math.max(g.a, from), z = Math.min(g.z, to); if (z <= a) continue;
+    const o = {};
+    if (g.c !== base) o.c = g.c;
+    for (const k of ['b', 'i', 'u']) if (g[k] !== !!(tb && tb[k])) o[k] = g[k] ? 1 : 0;
+    if (Object.keys(o).length) out.push({ a: a - from + off, z: z - from + off, ...o });
+  }
+  return out;
+}
+function setRunsRange(rt, a, z, runs) {
+  const out = [];
+  for (const r of rt) {
+    if (r.z <= a || r.a >= z) { out.push(r); continue; }
+    if (r.a < a) out.push({ ...r, z: a });
+    if (r.z > z) out.push({ ...r, a: z });
+  }
+  return out.concat(runs).sort((x, y) => x.a - y.a);
+}
+const sameText = (a, b) => (a || '').replace(/\r\n?/g, '\n') === (b || '').replace(/\r\n?/g, '\n');
+// Pegar dentro de la celda en edición el texto copiado con su formato
+function pasteRich(el, clip) {
+  syncRuns();
+  const e = S.editing, p = el.selectionStart, base = cellAt(e.r, e.c, e.sid)?.s || {};
+  editReplace(el, clip.t);
+  if (el.value[0] === '=') return;
+  e.rt = setRunsRange(e.rt, p, p + clip.t.length, segsToRuns(clip.segs, 0, clip.t.length, p, base));
+  e.rtTouched = true;
+  placeEditor(); schedule();
+}
+
 // ================================================================== ORDENAR
 function sortSel(desc) {
   const R = boundedSel();
   if (R.r1 === R.r2) return toast('Selecciona varias filas para ordenar (por ejemplo A2:H20).');
-  const key = S.sel.ac, cells = cellsOf(S.sid);
+  sortRange(R, S.sel.ac, desc);
+}
+function sortRange(R, key, desc) {
+  const cells = cellsOf(S.sid);
   const rows = [];
   for (let r = R.r1; r <= R.r2; r++) {
     const row = []; for (let c = R.c1; c <= R.c2; c++) row.push(cells[keyOf(r, c)] || null);
@@ -1208,7 +1540,11 @@ function sheetCells(X, ws, fmt, colorOf) {
   const anchos = {}, altos = {};
   (ws['!cols'] || []).forEach((c, i) => { if (c && !c.hidden) { const px = c.wpx || (c.wch ? Math.round(c.wch * 7 + 5) : 0); if (px && Math.abs(px - DEF_W) > 2) anchos['c' + i] = Math.round(px); } });
   (ws['!rows'] || []).forEach((r, i) => { if (r && i <= mr + 3) { const px = r.hpt ? Math.round(r.hpt * 4 / 3) : (r.hpx || 0); if (px >= 12 && Math.abs(px - DEF_H) > 1) altos['r' + i] = px; } });
-  return { cells, anchos, altos };
+  const comb = {};
+  for (const m of ws['!merges'] || []) if (m && m.e && (m.e.r > m.s.r || m.e.c > m.s.c) && m.e.r <= 20000 && m.e.c <= 200) comb[keyOf(m.s.r, m.s.c)] = keyOf(m.e.r, m.e.c);
+  let filtro = null;
+  try { const ref = ws['!autofilter'] && ws['!autofilter'].ref; if (ref) { const d = X.utils.decode_range(ref); filtro = { r: d.s.r, c1: d.s.c, c2: d.e.c }; } } catch { filtro = null; }
+  return { cells, anchos, altos, comb, filtro };
 }
 const STYLE_VERSION = 2;
 function readWorkbook(X, buf) {
@@ -1260,22 +1596,28 @@ async function maybeUpgrade() {
 let richWb = null; const richBusy = new Set();
 async function maybeRich(sid) {
   const lb = libroById(S.book), h = S.tree.hojas[sid];
-  if (!lb || !h || h.rtv || richBusy.has(sid) || !loaded.has(sid) || !S.tree.meta.importado || !(h.origen || /^s\d{3}$/.test(sid))) return;
+  if (!lb || !h || (h.rtv && h.v2) || richBusy.has(sid) || !loaded.has(sid) || !S.tree.meta.importado || !(h.origen || /^s\d{3}$/.test(sid))) return;
   richBusy.add(sid);
   try {
     if (!richWb) richWb = (async () => { const X = await loadXLSX(); const r = await fetch(encodeURI(lb.archivo), { cache: 'no-cache' }); if (!r.ok) throw new Error('sin archivo'); return { X, ...readWorkbook(X, await r.arrayBuffer()) }; })();
     const { X, wb, fmt } = await richWb;
     const name = h.origen || wb.SheetNames[+sid.slice(1) - 1], ws = wb.Sheets[name];
-    const upd = { [`hojas/${sid}/rtv`]: 1 }; let n = 0;
+    const upd = { [`hojas/${sid}/rtv`]: 1, [`hojas/${sid}/v2`]: 1 }; let n = 0;
     if (ws) {
-      const { cells } = sheetCells(X, ws, fmt[name], fmt.colorOf), cur0 = cellsOf(sid);
-      for (const [k, o] of Object.entries(cells)) {
+      const { cells, comb, filtro } = sheetCells(X, ws, fmt[name], fmt.colorOf), cur0 = cellsOf(sid);
+      const same = k => (cur0[k] ? cur0[k].v : undefined) === (cells[k] ? cells[k].v : undefined);
+      if (!h.rtv) for (const [k, o] of Object.entries(cells)) {
         if (!o.s || !o.s.rt) continue;
         const c = cur0[k];
         if (c && c.v === o.v && !(c.s && c.s.rt)) { upd[`celdas/${sid}/${k}/s/rt`] = o.s.rt; n++; }
       }
+      if (!h.v2) { // celdas combinadas y flechas de filtro del Excel, si esa zona no cambió
+        if (!h.comb) for (const [k, v] of Object.entries(comb)) if (same(k)) upd[`hojas/${sid}/comb/${k}`] = v;
+        if (!h.filtro && filtro && same(keyOf(filtro.r, filtro.c1))) upd[`hojas/${sid}/filtro`] = filtro;
+      }
     }
-    if (S.tree.hojas[sid] && !S.tree.hojas[sid].rtv) await write(upd, false);
+    const now = S.tree.hojas[sid];
+    if (now && !(now.rtv && now.v2)) await write(upd, false);
   } catch (e) { richWb = null; console.warn('Formato por partes no disponible', e); }
   richBusy.delete(sid);
 }
@@ -1327,15 +1669,16 @@ async function syncBook(buf, lb) {
       idx++;
       const ws = wb.Sheets[name]; if (!ws) continue;
       U.sinfo.textContent = `Revisando el Excel: hoja ${idx} de ${wb.SheetNames.length}…`;
-      const { cells, anchos, altos } = sheetCells(X, ws, fmt[name], fmt.colorOf);
+      const { cells, anchos, altos, comb, filtro } = sheetCells(X, ws, fmt[name], fmt.colorOf);
       const fp = fingerprint(cells, anchos, altos);
       const ln = name.toLowerCase(), list = sortedSheets();
       const hit = list.find(([, h]) => (h.origen || '').toLowerCase() === ln) || list.find(([, h]) => !h.origen && (h.nombre || '').toLowerCase() === ln);
       if (!hit) {
         if (borradas[fnv(ln)]) continue; // la borraron en la página: no se vuelve a crear
         const sid = 'x' + fnv(ln), orden = prevOrden + 0.001;
-        const meta = { nombre: uniqueName(name), orden, origen: name, huella: fp.huella, dims: fp.dims, rtv: 1 };
+        const meta = { nombre: uniqueName(name), orden, origen: name, huella: fp.huella, dims: fp.dims, rtv: 1, v2: 1 };
         if (orNull(anchos)) meta.anchos = anchos; if (orNull(altos)) meta.altos = altos;
+        if (orNull(comb)) meta.comb = comb; if (filtro) meta.filtro = filtro;
         S.tree.hojas[sid] = meta;
         await write({ ['hojas/' + sid]: meta, ['celdas/' + sid]: orNull(cells), ['bases/' + sid]: orNull(fp.hashes) }, false);
         nuevas++; prevOrden = orden; continue;
@@ -1373,11 +1716,14 @@ async function importBuffer(buf, seed, progress) {
   for (const name of wb.SheetNames) {
     idx++; if (progress) progress(idx, wb.SheetNames.length);
     const ws = wb.Sheets[name]; if (!ws) continue;
-    const { cells, anchos, altos } = sheetCells(X, ws, fmt[name], fmt.colorOf);
+    const { cells, anchos, altos, comb, filtro } = sheetCells(X, ws, fmt[name], fmt.colorOf);
     const sid = seed ? 's' + String(idx).padStart(3, '0') : newSid();
     const meta = { nombre: seed ? name : uniqueName(name), orden: order++ };
     if (Object.keys(anchos).length) meta.anchos = anchos;
     if (Object.keys(altos).length) meta.altos = altos;
+    if (Object.keys(comb).length) meta.comb = comb;
+    if (filtro) meta.filtro = filtro;
+    meta.v2 = 1;
     const upd = { ['hojas/' + sid]: meta, ['celdas/' + sid]: Object.keys(cells).length ? cells : null };
     if (seed) { const fp = fingerprint(cells, anchos, altos); Object.assign(meta, { origen: name, huella: fp.huella, dims: fp.dims, rtv: 1 }); upd['bases/' + sid] = Object.keys(fp.hashes).length ? fp.hashes : null; }
     S.tree.hojas[sid] = meta; // reserva el nombre para la siguiente hoja
@@ -1409,6 +1755,8 @@ async function exportXlsx() {
       mr = Math.max(mr, p.r); mc = Math.max(mc, p.c);
     }
     ws['!ref'] = X.utils.encode_range({ s: { r: 0, c: 0 }, e: { r: mr, c: mc } });
+    const mgs = merges(sid).list.map(g => ({ s: { r: g.r1, c: g.c1 }, e: { r: g.r2, c: g.c2 } }));
+    if (mgs.length) ws['!merges'] = mgs;
     const an = h.anchos || {}; ws['!cols'] = Array.from({ length: mc + 1 }, (_, i) => ({ wpx: an['c' + i] || DEF_W }));
     let nm = (h.nombre || 'Hoja').replace(/[\\/?*[\]:]/g, ' ').slice(0, 31) || 'Hoja';
     while (used.has(nm.toLowerCase())) nm = nm.slice(0, 28) + '_' + used.size;
@@ -1532,7 +1880,10 @@ function cellMenu(x, y) {
     { icon: '', label: 'Borrar contenido', hint: 'Supr', run: () => clearSel('content') },
     '-',
     { icon: 'bolt', label: 'Análisis rápido', disabled: true },
-    { icon: '', label: 'Filtrar', disabled: true, sub: [] },
+    { icon: '', label: 'Filtrar', sub: () => [
+      { icon: 'filter_alt', label: 'Filtrar por el valor de la celda seleccionada', run: filterByValue },
+      { icon: 'filter_alt_off', label: 'Borrar filtro', disabled: !Object.keys(S.filt).length, run: () => clearFilter() },
+      { icon: 'filter_list', label: filterDef() ? 'Quitar las flechas de filtro' : 'Activar filtro', run: toggleFilter }] },
     { icon: '', label: 'Ordenar', sub: [
       { icon: 'north', label: 'Ordenar de A a Z', run: () => sortSel(false) }, { icon: 'south', label: 'Ordenar de Z a A', run: () => sortSel(true) }] },
     '-',
@@ -1591,7 +1942,7 @@ function pickFromList() {
     if (vals.size > 300) break;
   }
   if (!vals.size) return toast('No hay otros valores en esta columna');
-  const k = keyOf(S.sel.ar, S.sel.ac), rect = cellRect(S.sel.ar, S.sel.ac), gr = U.gc.getBoundingClientRect();
+  const k = keyOf(S.sel.ar, S.sel.ac), cr = clientRect(S.sel.ar, S.sel.ac), rect = { x: cr.x, y: cr.y, w: cr.w, h: cr.h }, gr = { left: 0, top: 0 };
   menu([{ search: 'Buscar' }, ...[...vals].sort((a, b) => a.localeCompare(b, 'es')).map(v => ({ label: esc(v), run: () => setInput(S.sid, S.sel.ar, S.sel.ac, v) }))],
     { x: gr.left + rect.x, y: gr.top + rect.y + rect.h }, { cls: 'pick' });
   void k;
@@ -1623,18 +1974,19 @@ function editReplace(el, text) {
 function editCopy(el, cut) {
   const t = el.value.slice(el.selectionStart, el.selectionEnd);
   if (!t) return toast('Selecciona primero el texto que quieres ' + (cut ? 'cortar' : 'copiar'));
-  S.textClip = t; S.clip = null;
+  S.textClip = { t, segs: el.value[0] === '=' ? [] : captureSegs(el.selectionStart, el.selectionEnd) }; S.clip = null;
   if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(t).catch(() => { try { document.execCommand('copy'); } catch { /* queda en la página */ } });
   else { try { document.execCommand('copy'); } catch { /* queda en la página */ } }
   if (cut) editReplace(el, '');
   el.focus();
 }
 async function editPaste(el) {
-  let t = null;
-  try { t = await navigator.clipboard.readText(); } catch { t = S.textClip; }
-  if (t == null || t === '') t = S.textClip;
+  let t = null; const tc = S.textClip;
+  try { t = await navigator.clipboard.readText(); } catch { t = tc && tc.t; }
+  if (t == null || t === '') t = tc && tc.t;
   if (!t) return toast('Usa Ctrl+V para pegar');
-  el.focus(); editReplace(el, t.replace(/\r\n?/g, '\n'));
+  el.focus();
+  if (tc && sameText(t, tc.t) && el.value[0] !== '=') pasteRich(el, tc); else editReplace(el, t.replace(/\r\n?/g, '\n'));
 }
 function editMenu(x, y, el) {
   const has = el.selectionEnd > el.selectionStart, rich = has && el.value[0] !== '=';
@@ -1790,6 +2142,18 @@ const CMD = {
     const n = (await dialog({ title: 'Tu nombre', input: S.me.nombre }))?.trim(); if (!n) return focusGrid();
     S.me.nombre = n; lsSet('xw-nombre', n); onSel(); renderUsers(); focusGrid();
   },
+  merge: () => mergeSel(true),
+  mergeMenu: at => menu([
+    { icon: 'cell_merge', label: 'Combinar y centrar', run: () => mergeSel(true) },
+    { icon: 'table_rows', label: 'Combinar celdas', run: () => mergeSel(false) },
+    { icon: 'grid_on', label: 'Separar celdas', run: unmergeSel }], at),
+  freezeMenu: at => { const h = cur(); menu([
+    { icon: 'ac_unit', label: 'Inmovilizar paneles', hint: `filas sobre ${keyOf(S.sel.ar, S.sel.ac)} y columnas a su izquierda`, run: () => setFreeze(S.sel.ar, S.sel.ac) },
+    { icon: 'table_rows', label: 'Inmovilizar fila superior', run: () => setFreeze(1, 0) },
+    { icon: 'view_week', label: 'Inmovilizar primera columna', run: () => setFreeze(0, 1) },
+    '-',
+    { icon: 'lock_open', label: 'Movilizar paneles', disabled: !(h.fr || h.fc), run: () => setFreeze(0, 0) }], at); },
+  filter: toggleFilter, filterClear: () => clearFilter(),
   cancelEdit: () => cancel(), commitEdit: () => commit(0, 0),
   tabsLeft: () => { const l = sortedSheets(), i = l.findIndex(x => x[0] === S.sid); if (i > 0) switchSheet(l[i - 1][0]); },
   tabsRight: () => { const l = sortedSheets(), i = l.findIndex(x => x[0] === S.sid); if (i < l.length - 1) switchSheet(l[i + 1][0]); }
@@ -1818,7 +2182,8 @@ function refreshRibbon() {
   on('bold', s.b); on('italic', s.i); on('underline', s.u); on('wrap', s.w);
   on('left', s.a === 'l'); on('center', s.a === 'c'); on('right', s.a === 'r');
   on('vtop', s.va === 't'); on('vmid', s.va === 'm'); on('vbot', s.va === 'b' || !s.va);
-  on('showFormulas', S.showF); on('grid', S.grid);
+  on('showFormulas', S.showF); on('grid', S.grid); on('filter', !!filterDef()); on('merge', !!mergeAt(S.sel.ar, S.sel.ac));
+  on('freezeMenu', !!(cur().fr || cur().fc));
   const sf = document.querySelector('.ribbon [data-cmd="font"]'); if (sf) sf.value = s.ff || 'Aptos Narrow';
   const ss = document.querySelector('.ribbon [data-cmd="size"]'); if (ss) { if (![...ss.options].some(o => +o.value === (s.fs || BASE_PT))) ss.add(new Option(s.fs, s.fs)); ss.value = s.fs || BASE_PT; }
   const sn = document.querySelector('.ribbon [data-cmd="numfmt"]'); if (sn) sn.value = s.nf || '';
@@ -1828,7 +2193,8 @@ function refreshRibbon() {
 function hit(e) {
   const wr = U.gw.getBoundingClientRect();
   const vx = e.clientX - wr.left, vy = e.clientY - wr.top;
-  const x = vx + U.gw.scrollLeft, y = vy + U.gw.scrollTop;
+  // dentro de un panel inmovilizado la posición no depende del desplazamiento
+  const x = vx + (vx - G.rhw < G.FW ? 0 : U.gw.scrollLeft), y = vy + (vy - G.hh < G.FH ? 0 : U.gw.scrollTop);
   return { vx, vy, x, y, inCol: vy < G.hh, inRow: vx < G.rhw, r: rowAt(Math.max(0, y - G.hh)), c: colAt(Math.max(0, x - G.rhw)) };
 }
 const POINT_CHARS = '=(+-*/^,;:&<>';
@@ -1901,6 +2267,8 @@ function bindUI() {
       return;
     }
     e.preventDefault();
+    const fb = e.target.closest('[data-filter]');
+    if (fb) { if (S.editing) commit(0, 0); filterMenu(+fb.dataset.filter, fb); return; }
     if (e.target.dataset.fill) { drag = { type: 'fill', src: rng() }; return; }
     // modo señalar (escribiendo una fórmula)
     if (S.editing && !h.inCol && !h.inRow && canPoint()) {
@@ -2013,14 +2381,19 @@ function bindUI() {
   fx.addEventListener('blur', () => { fx.style.height = ''; });
   fx.addEventListener('input', () => { if (!S.editing) startEdit(fx.value, 'edit', 'bar'); S.point = null; ed.value = fx.value; placeEditor(); fnSuggest(fx); schedule(); });
   // Editando: se copia solo el texto seleccionado (copia nativa) y se olvida la última celda copiada
-  const textCopied = el => { const t = el.value.slice(el.selectionStart, el.selectionEnd); if (t) { S.textClip = t; S.clip = null; schedule(); } };
+  const textCopied = el => { const t = el.value.slice(el.selectionStart, el.selectionEnd); if (t) { S.textClip = { t, segs: el.value[0] === '=' ? [] : captureSegs(el.selectionStart, el.selectionEnd) }; S.clip = null; schedule(); } };
+  const richPaste = el => e => { // pegar dentro de la celda lo copiado de otra celda, con sus colores
+    const tc = S.textClip; if (!S.editing || !tc || el.value[0] === '=' || !sameText(e.clipboardData.getData('text/plain'), tc.t)) return;
+    e.preventDefault(); pasteRich(el, tc);
+  };
+  fx.addEventListener('paste', richPaste(fx));
   ed.addEventListener('copy', e => { if (!S.editing) doCopy(false, e); else textCopied(ed); });
   ed.addEventListener('cut', e => { if (!S.editing) doCopy(true, e); else textCopied(ed); });
   fx.addEventListener('copy', () => textCopied(fx));
   fx.addEventListener('cut', () => textCopied(fx));
   fx.addEventListener('mousedown', e => { if (e.button === 2 && S.editing && document.activeElement === fx) e.preventDefault(); });
   fx.addEventListener('contextmenu', e => { if (S.editing) { e.preventDefault(); editMenu(e.clientX, e.clientY, fx); } });
-  ed.addEventListener('paste', e => { if (S.editing) return; e.preventDefault(); doPaste(e.clipboardData.getData('text/plain'), e.clipboardData.getData('text/html')); });
+  ed.addEventListener('paste', e => { if (S.editing) return richPaste(ed)(e); e.preventDefault(); doPaste(e.clipboardData.getData('text/plain'), e.clipboardData.getData('text/html')); });
 
   namebox.addEventListener('keydown', e => {
     if (e.key !== 'Enter' && e.key !== 'Escape') return;
@@ -2096,8 +2469,9 @@ function onKey(e, src) {
   if (k === ' ' && ctrl && !e.shiftKey) { e.preventDefault(); const R0 = rng(); select(0, R0.c1, G.nr - 1, R0.c2, false); return; }
   if (k === ' ' && e.shiftKey && !ctrl) { e.preventDefault(); const R0 = rng(); select(R0.r1, 0, R0.r2, G.nc - 1, false); return; }
   if (k === ' ' && e.shiftKey && ctrl) { e.preventDefault(); select(0, 0, G.nr - 1, G.nc - 1, false); return; }
-  if (ctrl && e.altKey && k.toLowerCase() === 'v') { e.preventDefault(); const r = cellRect(S.sel.ar, S.sel.ac), g = U.gc.getBoundingClientRect(); menu(pasteSpecialItems(), { x: g.left + r.x + r.w, y: g.top + r.y }); return; }
+  if (ctrl && e.altKey && k.toLowerCase() === 'v') { e.preventDefault(); const r = clientRect(S.sel.ar, S.sel.ac); menu(pasteSpecialItems(), { x: r.x + r.w, y: r.y }); return; }
   if (ctrl && k === '1') { e.preventDefault(); formatCells(); return; }
+  if (ctrl && e.shiftKey && k.toLowerCase() === 'l') { e.preventDefault(); toggleFilter(); return; }
   if (ctrl) {
     const l = k.toLowerCase();
     const map = { z: undo, y: redo, b: CMD.bold, n: CMD.bold, i: CMD.italic, k: CMD.italic, u: CMD.underline, f: find, s: CMD.save, p: printSheet, d: () => fillDir('d'), r: () => fillDir('r'), a: () => select(0, 0, G.nr - 1, G.nc - 1, false), '`': CMD.showFormulas, ';': CMD.today, '+': () => zoom(S.z + .1), '-': () => zoom(S.z - .1) };
